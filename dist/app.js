@@ -1,4 +1,5 @@
 import { ChangeDetector, scorePoint } from './vision.js';
+import { focusSupport, cropPointToCamera, requestPointFocus } from './focus.js';
 
 const $ = id => document.getElementById(id);
 const canvas = $('cameraView');
@@ -18,6 +19,9 @@ const state = {
   zoom: 1, nativeZoom: false, lastAnalysis: 0, holdUntil: 0, wakeLock: null,
   frameReady: false, lastStatus: '', flashUntil: 0,
   viewRevision: 0,
+  alignment: { x: 0, y: 0 }, focusBusy: false, focusRequest: null,
+  recoveryNoticeUntil: 0,
+  geometryMismatch: false,
 };
 let toastTimer;
 let zoomTimer;
@@ -46,8 +50,23 @@ function currentFrame() {
   return analysisCtx.getImageData(0, 0, 320, 320);
 }
 
+// Stored coordinates belong to the detector's reference image. Adopt a
+// measured translation only when that reference is replaced.
+function adoptAlignment() {
+  const { x, y } = state.alignment;
+  if (x || y) {
+    state.calibration.cx += x;
+    state.calibration.cy += y;
+    for (const shot of state.shots) if (shot.viewRevision === state.viewRevision) {
+      shot.x += x; shot.y += y;
+    }
+  }
+  state.alignment = { x: 0, y: 0 };
+}
+
 function reference() {
   if (!state.frameReady) { toast('Sačekaj da se pojavi slika kamere.'); return false; }
+  adoptAlignment();
   detector.setReference(currentFrame());
   state.holdUntil = performance.now() + 600;
   return true;
@@ -72,6 +91,7 @@ function pause(detail = 'Nastavi kada si spreman.') {
 }
 
 function start() {
+  if (state.geometryMismatch) { calibrate(); return false; }
   if (state.calibrating) { toast('Prvo završi podešavanje krugova.'); return false; }
   if (!state.calibrated) { toast('Prvo dodirni „Podesi metu“ i označi krugove.'); return false; }
   if (state.pending) { toast('Potvrdi ili odbaci prikazanu promjenu.'); return false; }
@@ -133,7 +153,7 @@ function onCandidate(candidate) {
   if ($('confirmToggle').checked) {
     state.pending = { ...candidate, score };
     $('pendingScore').value = String(score);
-    $('candidateInfo').textContent = `Nova vidljiva promjena · procjena ${score} bodova.`;
+    $('candidateInfo').textContent = `Nova vidljiva promjena · procjena ${score} bodova. Slika je zadržana do potvrde.`;
     $('pendingPanel').hidden = false;
     setStatus('pending', 'Potvrdi očitanje', 'Provjeri označenu promjenu i vrijednost prije upisa.');
   } else record(candidate, score);
@@ -206,8 +226,8 @@ function drawRaw() {
 function drawOverlay(now) {
   const size = canvas.width;
   ctx.drawImage(raw, 0, 0, size, size);
-  const c = state.calibration;
-  if (state.calibrated || state.calibrating) {
+  const c = { ...state.calibration, cx: state.calibration.cx + state.alignment.x, cy: state.calibration.cy + state.alignment.y };
+  if ((state.calibrated && !state.geometryMismatch) || state.calibrating) {
     ctx.save();
     ctx.strokeStyle = state.calibrating ? '#d7f879' : 'rgba(132,178,158,.58)';
     ctx.lineWidth = 1.2;
@@ -221,10 +241,17 @@ function drawOverlay(now) {
   }
   for (let i = 0; i < state.shots.length; i++) {
     const s = state.shots[i];
+    if (state.geometryMismatch) continue;
     if (s.viewRevision !== state.viewRevision) continue;
-    marker(s.x, s.y, String(i + 1), i === state.shots.length - 1 ? '#e9ff9a' : '#f8a879');
+    marker(s.x + state.alignment.x, s.y + state.alignment.y, String(i + 1), i === state.shots.length - 1 ? '#e9ff9a' : '#f8a879');
   }
-  if (state.pending) marker(state.pending.x, state.pending.y, '?', '#ffce6b');
+  if (state.pending) marker(state.pending.x + state.alignment.x, state.pending.y + state.alignment.y, '?', '#ffce6b');
+  if (state.focusRequest && now < state.focusRequest.until) {
+    const { x, y } = state.focusRequest;
+    ctx.save(); ctx.strokeStyle = '#d4f87a'; ctx.lineWidth = 1.5;
+    ctx.strokeRect(x * size - 18, y * size - 18, 36, 36);
+    ctx.restore();
+  }
   if (state.flashUntil > now) {
     ctx.strokeStyle = `rgba(215,248,121,${Math.min(.8, (state.flashUntil - now) / 1400)})`;
     ctx.lineWidth = 5; ctx.strokeRect(2, 2, size - 4, size - 4);
@@ -239,13 +266,28 @@ function marker(x, y, label, color) {
 }
 
 function frame(now) {
-  drawRaw();
-  if (state.active && !state.pending && state.frameReady && now - state.lastAnalysis > 120 && now > state.holdUntil) {
+  // A confirmation refers to the exact displayed detection frame, not a newer
+  // live frame that may have moved while the user was reviewing the result.
+  if (!state.pending) drawRaw();
+  if (state.active && !state.pending && !state.focusBusy && state.frameReady && now - state.lastAnalysis > 120 && now > state.holdUntil) {
     state.lastAnalysis = now;
     const result = detector.analyze(currentFrame(), state.calibration, { threshold: Number($('thresholdRange').value) }, now);
+    if (result.alignment) state.alignment = result.alignment;
+    state.geometryMismatch = result.status === 'recalibrate';
     if (result.status === 'candidate') onCandidate(result.candidate);
-    else if (result.status === 'movement') setStatus('motion', 'Slika se promijenila', 'Sačekaj stabilnu sliku. Ako je kadar pomjeren, postavi novu referentnu sliku.');
-    else if (result.status === 'stable') setStatus('live', 'Pratim promjene', state.mode === 'demo' ? 'Probni prikaz · dodaj trag da isprobaš očitavanje.' : 'Slika je stabilna. Čekam novu vidljivu promjenu.');
+    else if (result.status === 'recovered') {
+      adoptAlignment();
+      state.recoveryNoticeUntil = now + 1800;
+      setStatus('live', 'Praćenje nastavljeno', 'Slika se stabilizirala. Nejasne promjene tokom smetnje nisu bodovane.');
+    } else if (result.status === 'recalibrate') {
+      // Keep evaluating frames: a temporary bump can return to the calibrated
+      // view without user intervention. Larger persistent changes need setup.
+      setStatus('motion', 'Kadar je pomjeren', 'Praćenje je uključeno. Vrati prethodni kadar ili dodirni „Podesi metu“.');
+    } else if (result.status === 'movement') {
+      if (result.reason === 'ambiguous') setStatus('motion', 'Više nejasnih promjena', 'Praćenje je uključeno. Za novo početno stanje odaberi „Nova referentna slika“.');
+      else if (result.reason === 'scene') setStatus('motion', 'Nejasna promjena kadra', 'Praćenje je uključeno. Ako je slika sada mirna, provjeri krugove i postavi novu referentnu sliku.');
+      else setStatus('motion', 'Čekam da se slika smiri', 'Praćenje je uključeno i nastavlja se kada se slika stabilizira.');
+    } else if (result.status === 'stable' && now > state.recoveryNoticeUntil) setStatus('live', 'Pratim promjene', state.mode === 'demo' ? 'Probni prikaz · dodaj trag da isprobaš očitavanje.' : 'Slika je stabilna. Čekam novu vidljivu promjenu.');
   }
   drawOverlay(now);
   requestAnimationFrame(frame);
@@ -275,6 +317,8 @@ function ringFields() {
 function calibrate() {
   if (!state.frameReady) return toast('Prvo uključi kameru.');
   pause('Podešavanje mete je u toku.'); resetPending();
+  adoptAlignment();
+  state.geometryMismatch = false;
   state.viewRevision++;
   state.calibrating = 1;
   canvas.style.cursor = 'crosshair';
@@ -283,10 +327,15 @@ function calibrate() {
   setStatus('setup', 'Označi centar', 'Dodirni centar mete, zatim vanjski rub kruga koji vrijedi 1 bod.');
 }
 
-canvas.addEventListener('pointerdown', e => {
-  if (!state.calibrating) return;
+let pointerStart = null;
+canvas.addEventListener('pointerdown', e => { pointerStart = { x: e.clientX, y: e.clientY, time: performance.now() }; });
+canvas.addEventListener('pointercancel', () => { pointerStart = null; });
+canvas.addEventListener('pointerup', e => {
+  const down = pointerStart; pointerStart = null;
+  if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 12 || performance.now() - down.time > 800) return;
   const box = canvas.getBoundingClientRect();
   const x = (e.clientX - box.left) / box.width, y = (e.clientY - box.top) / box.height;
+  if (!state.calibrating) { focusAt(x, y); return; }
   if (state.calibrating === 1) {
     state.calibration.cx = x; state.calibration.cy = y; state.calibrating = 2;
     $('calibrationHint').textContent = '2 / 2 · Dodirni vanjski rub bodovnog kruga 1.';
@@ -304,7 +353,59 @@ canvas.addEventListener('pointerdown', e => {
   }
 });
 
+function updateFocusUI() {
+  const track = state.stream?.getVideoTracks()[0];
+  const support = focusSupport(track, navigator.mediaDevices?.getSupportedConstraints?.() || {});
+  $('focusButton').disabled = state.mode !== 'camera' || !support.point;
+  $('focusHint').textContent = state.mode !== 'camera' ? 'Uključi kameru da provjeriš dostupnost fokusa na dodir.'
+    : support.point ? 'Dodirni sliku za zahtjev fokusa na tom mjestu. Tokom podešavanja dodiri označavaju krugove.'
+    : 'Ovaj preglednik ne omogućava fokusiranje dodirom; fokusom upravlja kamera.';
+}
+
+async function focusAt(x, y) {
+  if (state.mode !== 'camera') return toast('Fokus je dostupan samo uz uključenu kameru.');
+  if (state.calibrating) return toast('Prvo završi podešavanje krugova.');
+  if (state.pending) return toast('Prvo potvrdi ili odbaci prikazanu promjenu.');
+  if (state.focusBusy) return;
+  const track = state.stream?.getVideoTracks()[0];
+  const supported = navigator.mediaDevices?.getSupportedConstraints?.() || {};
+  if (!focusSupport(track, supported).point) {
+    updateFocusUI(); return toast('Ovaj preglednik ne omogućava fokusiranje dodirom; fokusom upravlja kamera.');
+  }
+  state.focusBusy = true;
+  $('focusButton').disabled = true;
+  $('focusHint').textContent = 'Šaljem zahtjev za fokus…';
+  try {
+    const point = cropPointToCamera(x, y, video.videoWidth, video.videoHeight, state.nativeZoom ? 1 : state.zoom);
+    const result = await requestPointFocus(track, supported, point);
+    if (state.stream?.getVideoTracks()[0] !== track) return;
+    if (result.status === 'requested') {
+      state.focusRequest = { x, y, until: performance.now() + 1300 };
+      $('focusHint').textContent = 'Zahtjev za fokus je poslan. Provjeri oštrinu slike.';
+    } else if (result.status === 'unverified') {
+      $('focusHint').textContent = 'Preglednik je prihvatio zahtjev, ali ne potvrđuje postavku fokusa.';
+      toast('Promjenu fokusa nije moguće potvrditi. Provjeri oštrinu slike.');
+    } else {
+      updateFocusUI(); toast('Kamera nije prihvatila zahtjev za fokus.');
+    }
+  } catch {
+    updateFocusUI(); toast('Zahtjev za fokus nije uspio.');
+  } finally {
+    state.focusBusy = false;
+    $('focusButton').disabled = !focusSupport(state.stream?.getVideoTracks()[0], navigator.mediaDevices?.getSupportedConstraints?.() || {}).point;
+    // Preserve the pre-focus reference: the detector will compare/recover only
+    // after the image settles, rather than discarding a possible visible mark.
+    state.holdUntil = performance.now() + 900;
+  }
+}
+
 function clearSeries(showToast = true) {
+  if (state.geometryMismatch) {
+    pause('Kadar je promijenjen. Ponovo podesi metu.');
+    state.calibrated = false;
+    state.geometryMismatch = false;
+    state.alignment = { x: 0, y: 0 };
+  }
   state.shots = []; state.marks = []; resetPending();
   drawRaw(); reference(); renderHistory();
   if (showToast) toast('Nova serija je spremna.');
@@ -326,6 +427,7 @@ async function openCamera(deviceId) {
     video.srcObject = stream;
     await video.play();
     state.mode = 'camera'; state.calibration = DEFAULT(); state.calibrated = false; state.calibrating = 0;
+    state.alignment = { x: 0, y: 0 }; state.focusRequest = null; state.geometryMismatch = false;
     state.zoom = 1; state.nativeZoom = false; resetPending();
     const track = stream.getVideoTracks()[0];
     const capabilities = track.getCapabilities?.() || {};
@@ -352,6 +454,7 @@ async function openCamera(deviceId) {
     $('cameraSelect').hidden = devices.length < 2;
     track.addEventListener('ended', () => { if (state.mode === 'camera' && state.stream?.getVideoTracks()[0] === track) { pause('Kamera je zaustavljena. Ponovo je uključi.'); state.frameReady = false; } });
     clearSeries(false); ringFields();
+    updateFocusUI();
     setStatus('ready', 'Kamera je uključena', 'Namjesti kadar i podesi bodovne krugove mete.');
   } catch (error) {
     const message = error.name === 'NotAllowedError' ? 'Dozvoli pristup kameri u postavkama preglednika, pa pokušaj ponovo.'
@@ -365,6 +468,7 @@ async function openCamera(deviceId) {
 function demo() {
   pause(); state.stream?.getTracks().forEach(t => t.stop()); state.stream = null; video.srcObject = null;
   state.mode = 'demo'; state.calibrating = 0; state.calibrated = true; state.calibration = DEFAULT();
+  state.alignment = { x: 0, y: 0 }; state.focusRequest = null; state.geometryMismatch = false;
   state.zoom = 1; state.nativeZoom = false;
   $('zoomRange').min = 1; $('zoomRange').max = 6; $('zoomRange').value = 1; $('zoomRange').disabled = true; $('zoomValue').textContent = '1.0×';
   $('zoomHelp').textContent = 'Uvećanje je dostupno kada uključiš kameru.';
@@ -375,6 +479,7 @@ function demo() {
   $('calibrationButton').textContent = 'Podesi metu';
   canvas.style.cursor = 'default';
   clearSeries(false); ringFields();
+  updateFocusUI();
   setStatus('ready', 'Isprobaj bez kamere', 'Dodaj probni trag ili uključi kameru svog telefona.');
 }
 
@@ -384,11 +489,15 @@ $('demoButton').addEventListener('click', demo);
 $('monitorButton').addEventListener('click', () => state.active ? pause() : start());
 $('referenceButton').addEventListener('click', () => {
   if (state.calibrating) return toast('Prvo završi podešavanje mete.');
+  if (state.geometryMismatch) { calibrate(); return; }
   state.viewRevision++;
   resetPending(); if (reference()) { toast('Trenutna slika je postavljena kao početno stanje.'); setStatus(state.active ? 'live' : 'ready', 'Referentna slika spremljena', state.active ? 'Pratim nove promjene.' : 'Dodirni „Pokreni praćenje“.'); }
 });
 $('calibrationButton').addEventListener('click', calibrate);
+$('focusButton').addEventListener('click', () => focusAt(.5, .5));
 $('resetCalibrationButton').addEventListener('click', () => {
+  state.alignment = { x: 0, y: 0 };
+  state.geometryMismatch = false;
   pause(); state.calibration = DEFAULT(); state.calibrated = state.mode === 'demo'; state.calibrating = 0; resetPending(); ringFields();
   $('calibrationHint').textContent = state.calibrated ? 'Vraćeni su krugovi probne mete.' : 'Dodirni „Podesi metu“ da označiš stvarnu metu.';
   canvas.style.cursor = 'default'; $('calibrationButton').textContent = 'Podesi metu'; reference();
@@ -396,6 +505,8 @@ $('resetCalibrationButton').addEventListener('click', () => {
 $('zoomRange').addEventListener('input', () => {
   if (state.mode !== 'camera') return;
   state.viewRevision++;
+  state.alignment = { x: 0, y: 0 };
+  state.geometryMismatch = false;
   pause('Kadar je promijenjen. Ponovo podesi metu.'); resetPending(); state.calibrated = false; state.calibrating = 0;
   state.zoom = Number($('zoomRange').value); $('zoomValue').textContent = `${state.zoom.toFixed(1)}×`;
   $('calibrationHint').textContent = 'Zum je promijenjen. Ponovo dodirni „Podesi metu“.';

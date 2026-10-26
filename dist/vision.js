@@ -27,183 +27,275 @@ export function scorePoint(x, y, calibration = {}) {
   return ring < 0 ? 0 : 10 - ring;
 }
 
+/**
+ * Alignment is normalized CURRENT minus REFERENCE translation. Candidate
+ * coordinates remain in REFERENCE space. On `recovered`, the current image
+ * becomes the reference: the caller must translate its calibration/overlays
+ * by the returned alignment before the next analyze call.
+ */
 export class ChangeDetector {
   constructor(width, height) {
     if (!Number.isInteger(width) || !Number.isInteger(height) || width < 8 || height < 8) {
       throw new RangeError('Image dimensions must be integers of at least 8 pixels.');
     }
-    this.width = width;
-    this.height = height;
-    this._size = width * height;
+    this.width = width; this.height = height; this._size = width * height;
     this._reference = null;
     this._gray = new Uint8Array(this._size);
     this._mask = new Uint8Array(this._size);
+    this._cleanMask = new Uint8Array(this._size);
     this._queue = new Int32Array(this._size);
     this._histogram = new Uint32Array(511);
-    this._pending = null;
-    this._emitted = false;
+    this._pending = null; this._emitted = false; this._recovery = null;
+    this._pointsKey = ''; this._points = [];
   }
 
-  get hasReference() {
-    return this._reference !== null;
-  }
+  get hasReference() { return this._reference !== null; }
 
   _read(imageData) {
     if (!imageData || imageData.width !== this.width || imageData.height !== this.height
       || !imageData.data || imageData.data.length < this._size * 4) {
       throw new RangeError('ImageData dimensions must match the detector.');
     }
-    const data = imageData.data;
     for (let i = 0, p = 0; i < this._size; i++, p += 4) {
-      this._gray[i] = (77 * data[p] + 150 * data[p + 1] + 29 * data[p + 2]) >> 8;
+      this._gray[i] = (77 * imageData.data[p] + 150 * imageData.data[p + 1] + 29 * imageData.data[p + 2]) >> 8;
     }
     return this._gray;
   }
 
-  setReference(imageData) {
-    this._reference = new Uint8Array(this._read(imageData));
-    this._pending = null;
-    this._emitted = false;
+  _gradients(gray) {
+    const gx = new Int16Array(this._size), gy = new Int16Array(this._size);
+    const w = this.width, h = this.height;
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const p = y * w + x;
+      gx[p] = gray[p + 1] - gray[p - 1];
+      gy[p] = gray[p + w] - gray[p - w];
+    }
+    return { gx, gy };
+  }
+
+  _adopt(gray) {
+    this._reference = new Uint8Array(gray);
+    this._referenceGradient = this._gradients(this._reference);
+    this._pending = null; this._emitted = false; this._recovery = null;
+    this._pointsKey = ''; this._points = [];
+  }
+
+  setReference(imageData) { this._adopt(this._read(imageData)); }
+
+  _align(current, calibration, maxShift) {
+    const { cx, cy, radius } = calibration;
+    const w = this.width, h = this.height;
+    const key = [cx, cy, radius, maxShift].join('/');
+    const ref = this._referenceGradient;
+    if (this._pointsKey !== key) {
+      this._pointsKey = key; this._points = [];
+      const stride = Math.max(2, Math.round(Math.min(w, h) / 120));
+      for (let y = maxShift + 2; y < h - maxShift - 2; y += stride) {
+        for (let x = maxShift + 2; x < w - maxShift - 2; x += stride) {
+          if (Math.hypot((x + .5) / w - cx, (y + .5) / h - cy) > radius) continue;
+          const p = y * w + x;
+          if (Math.abs(ref.gx[p]) + Math.abs(ref.gy[p]) >= 30) this._points.push(p);
+        }
+      }
+    }
+    // A plain sheet has no geometry to register; normal localized detection
+    // still works, but it is never eligible for automatic broad-change reset.
+    if (this._points.length < 12) return { dx: 0, dy: 0, confidence: 0, textured: false, edgeRatio: 1 };
+    const gradient = this._gradients(current);
+    let refEnergy = 0;
+    for (const p of this._points) refEnergy += ref.gx[p] ** 2 + ref.gy[p] ** 2;
+    let best = { dx: 0, dy: 0, confidence: -1, textured: true, edgeRatio: 1 };
+    let bestRank = -Infinity;
+    for (let dy = -maxShift; dy <= maxShift; dy++) for (let dx = -maxShift; dx <= maxShift; dx++) {
+      const offset = dy * w + dx;
+      let dot = 0, energy = 0;
+      for (const p of this._points) {
+        const q = p + offset, gx = gradient.gx[q], gy = gradient.gy[q];
+        dot += ref.gx[p] * gx + ref.gy[p] * gy;
+        energy += gx * gx + gy * gy;
+      }
+      const confidence = energy ? dot / Math.sqrt(refEnergy * energy) : 0;
+      const rank = confidence - (Math.abs(dx) + Math.abs(dy)) * .00001;
+      if (rank > bestRank) {
+        bestRank = rank;
+        best = { dx, dy, confidence, textured: true, edgeRatio: Math.sqrt(energy / refEnergy) };
+      }
+    }
+    return best;
+  }
+
+  _medianShift(current, dx, dy, calibration, gain = 1) {
+    this._histogram.fill(0);
+    const w = this.width, h = this.height;
+    let samples = 0;
+    for (let y = 1; y < h - 1; y += 3) for (let x = 1; x < w - 1; x += 3) {
+      if (Math.hypot((x + .5) / w - calibration.cx, (y + .5) / h - calibration.cy) > calibration.radius) continue;
+      if (x + dx < 0 || x + dx >= w || y + dy < 0 || y + dy >= h) continue;
+      const p = y * w + x;
+      const difference = Math.round(current[p + dy * w + dx] - this._reference[p] * gain);
+      this._histogram[Math.max(0, Math.min(510, difference + 255))]++; samples++;
+    }
+    if (!samples) return 0;
+    let n = 0;
+    for (let bin = 0; bin < 511; bin++) {
+      n += this._histogram[bin];
+      if (n >= Math.ceil(samples / 2)) return bin - 255;
+    }
+    return 0;
+  }
+
+  _luminanceGain(current, dx, dy, calibration) {
+    const w = this.width, h = this.height;
+    let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (let y = 2; y < h - 2; y += 3) for (let x = 2; x < w - 2; x += 3) {
+      if (Math.hypot((x + .5) / w - calibration.cx, (y + .5) / h - calibration.cy) > calibration.radius) continue;
+      if (x + dx < 0 || x + dx >= w || y + dy < 0 || y + dy >= h) continue;
+      const p = y * w + x, a = this._reference[p], b = current[p + dy * w + dx];
+      n++; sx += a; sy += b; sxx += a * a; sxy += a * b;
+    }
+    const variance = n ? sxx / n - (sx / n) ** 2 : 0;
+    if (variance < 400) return 1;
+    const gain = (sxy / n - sx * sy / (n * n)) / variance;
+    // A bounded global camera exposure adjustment, not arbitrary local fitting.
+    return Math.max(.6, Math.min(1.6, gain));
+  }
+
+  _nearReferenceEdge(x, y) {
+    const { gx, gy } = this._referenceGradient, w = this.width, h = this.height;
+    for (let yy = Math.max(1, y - 2); yy <= Math.min(h - 2, y + 2); yy++) {
+      for (let xx = Math.max(1, x - 2); xx <= Math.min(w - 2, x + 2); xx++) {
+        const p = yy * w + xx;
+        if (Math.abs(gx[p]) + Math.abs(gy[p]) >= 30) return true;
+      }
+    }
+    return false;
+  }
+
+  _recover(current, calibration, alignment, nowMs) {
+    const previous = this._recovery;
+    let stable = false;
+    if (previous && Number.isFinite(nowMs) && nowMs >= previous.last && nowMs - previous.last <= 500
+      && alignment.dx === previous.dx && alignment.dy === previous.dy) {
+      let total = 0, difference = 0, changed = 0;
+      const w = this.width, h = this.height;
+      for (let y = 1; y < h - 1; y += 2) for (let x = 1; x < w - 1; x += 2) {
+        if (Math.hypot((x + .5) / w - calibration.cx, (y + .5) / h - calibration.cy) > calibration.radius) continue;
+        const p = y * w + x, delta = Math.abs(current[p] - previous.anchor[p]);
+        difference += delta; total++; if (delta > 10) changed++;
+      }
+      stable = total > 0 && difference / total <= 2 && changed / total <= .003;
+    }
+    if (!stable) {
+      this._recovery = { anchor: new Uint8Array(current), since: nowMs, last: nowMs, frames: 1, dx: alignment.dx, dy: alignment.dy };
+      return false;
+    }
+    previous.last = nowMs; previous.frames++;
+    if (previous.frames < 7 || nowMs - previous.since < 1200) return false;
+    this._adopt(current);
+    return true;
   }
 
   analyze(imageData, calibration = {}, options = {}, nowMs = performance.now()) {
     const current = this._read(imageData);
-    if (!this.hasReference) return { status: 'waiting', changedPixels: 0 };
-    if (this._emitted) return { status: 'waiting', changedPixels: 0 };
-
-    const threshold = Number.isFinite(options.threshold)
-      ? Math.max(5, Math.min(255, options.threshold)) : 35;
+    if (!this.hasReference || this._emitted) return { status: 'waiting', changedPixels: 0, alignment: { x: 0, y: 0 } };
+    const threshold = Number.isFinite(options.threshold) ? Math.max(5, Math.min(255, options.threshold)) : 35;
     const minArea = Number.isFinite(options.minArea) ? Math.max(1, options.minArea) : 4;
-    const maxArea = Number.isFinite(options.maxArea)
-      ? Math.max(minArea, options.maxArea) : 250;
-    const stableFrames = Number.isFinite(options.stableFrames)
-      ? Math.max(1, Math.floor(options.stableFrames)) : 3;
-    const { cx, cy, radius } = calibrationValues(calibration);
-    const { width, height } = this;
-    const minX = Math.max(0, Math.floor((cx - radius) * width));
-    const maxX = Math.min(width - 1, Math.ceil((cx + radius) * width));
-    const minY = Math.max(0, Math.floor((cy - radius) * height));
-    const maxY = Math.min(height - 1, Math.ceil((cy + radius) * height));
-    this._mask.fill(0);
-    this._histogram.fill(0);
-
-    // Median light-level shift ignores a few new marks. This compensates only
-    // approximately uniform exposure changes, never shadows or physical motion.
-    let samples = 0;
-    for (let y = minY; y <= maxY; y += 2) {
-      for (let x = minX; x <= maxX; x += 2) {
-        const dx = (x + 0.5) / width - cx;
-        const dy = (y + 0.5) / height - cy;
-        if (dx * dx + dy * dy > radius * radius) continue;
-        const p = y * width + x;
-        this._histogram[current[p] - this._reference[p] + 255]++;
-        samples++;
-      }
-    }
-    if (!samples) {
-      this._pending = null;
-      return { status: 'waiting', changedPixels: 0 };
-    }
-    let medianBin = 0;
-    let cumulative = 0;
-    for (; medianBin < 511; medianBin++) {
-      cumulative += this._histogram[medianBin];
-      if (cumulative >= Math.ceil(samples / 2)) break;
-    }
-    const lightShift = medianBin - 255;
-    let changedPixels = 0;
+    const maxArea = Number.isFinite(options.maxArea) ? Math.max(minArea, options.maxArea) : 250;
+    const stableFrames = Number.isFinite(options.stableFrames) ? Math.max(1, Math.floor(options.stableFrames)) : 3;
+    const c = calibrationValues(calibration), { width: w, height: h } = this;
+    const maxShift = Math.min(5, Math.floor(Math.min(w, h) / 10));
+    const aligned = this._align(current, c, maxShift);
+    // Do not apply an arbitrary best offset if the patterns do not correspond.
+    const reliable = aligned.textured && aligned.confidence >= .72;
+    const dx = reliable ? aligned.dx : 0, dy = reliable ? aligned.dy : 0;
+    const alignment = { x: dx / w, y: dy / h };
+    const result = (status, changedPixels, extra = {}) => ({ status, changedPixels, alignment, ...extra });
+    const luminanceGain = reliable ? this._luminanceGain(current, dx, dy, c) : 1;
+    const lightShift = this._medianShift(current, dx, dy, c, luminanceGain);
+    this._mask.fill(0); this._cleanMask.fill(0);
     let regionPixels = 0;
-    for (let y = minY; y <= maxY; y++) {
-      for (let x = minX; x <= maxX; x++) {
-        const dx = (x + 0.5) / width - cx;
-        const dy = (y + 0.5) / height - cy;
-        if (dx * dx + dy * dy > radius * radius) continue;
-        regionPixels++;
-        const p = y * width + x;
-        if (Math.abs(current[p] - this._reference[p] - lightShift) >= threshold) {
-          this._mask[p] = 1;
-          changedPixels++;
-        }
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      if (Math.hypot((x + .5) / w - c.cx, (y + .5) / h - c.cy) > c.radius) continue;
+      if (x + dx < 0 || x + dx >= w || y + dy < 0 || y + dy >= h) continue;
+      const p = y * w + x; regionPixels++;
+      if (Math.abs(current[p + dy * w + dx] - this._reference[p] * luminanceGain - lightShift) >= threshold) {
+        this._mask[p] = 1;
       }
     }
-
+    // Remove isolated one- and two-pixel fluctuations before counting change.
+    let changedPixels = 0;
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const p = y * w + x;
+      if (!this._mask[p]) continue;
+      let neighbors = 0;
+      for (let yy = y - 1; yy <= y + 1; yy++) for (let xx = x - 1; xx <= x + 1; xx++) neighbors += this._mask[yy * w + xx];
+      if (neighbors >= 3) { this._cleanMask[p] = 1; changedPixels++; }
+    }
+    this._mask.set(this._cleanMask);
     if (changedPixels < minArea) {
-      this._pending = null;
-      return { status: 'stable', changedPixels };
+      this._pending = null; this._recovery = null;
+      return result('stable', changedPixels);
     }
-    if (changedPixels > Math.max(minArea * 3, regionPixels * 0.035)) {
-      this._pending = null;
-      return { status: 'movement', changedPixels };
+    const widespread = changedPixels > Math.max(minArea * 3, regionPixels * .035);
+    if (widespread && aligned.textured && !reliable) {
+      this._pending = null; this._recovery = null;
+      return result('recalibrate', changedPixels, { reason: 'geometry' });
     }
 
-    // Eight-connected components separate isolated small changes from outlines
-    // and large patches introduced by camera or paper motion.
     const components = [];
-    let rejectedArea = 0;
+    let rejectedArea = 0, edgeChanged = 0, offEdgeCandidates = 0;
     for (let start = 0; start < this._size; start++) {
       if (!this._mask[start]) continue;
-      let head = 0;
-      let tail = 1;
-      this._queue[0] = start;
-      this._mask[start] = 0;
-      let area = 0;
-      let sumX = 0;
-      let sumY = 0;
-      let left = width;
-      let right = 0;
-      let top = height;
-      let bottom = 0;
+      let head = 0, tail = 1, area = 0, sumX = 0, sumY = 0, edgeArea = 0;
+      let left = w, right = 0, top = h, bottom = 0;
+      this._queue[0] = start; this._mask[start] = 0;
       while (head < tail) {
-        const p = this._queue[head++];
-        const x = p % width;
-        const y = Math.floor(p / width);
-        area++;
-        sumX += x + 0.5;
-        sumY += y + 0.5;
-        left = Math.min(left, x);
-        right = Math.max(right, x);
-        top = Math.min(top, y);
-        bottom = Math.max(bottom, y);
-        for (let ny = Math.max(0, y - 1); ny <= Math.min(height - 1, y + 1); ny++) {
-          for (let nx = Math.max(0, x - 1); nx <= Math.min(width - 1, x + 1); nx++) {
-            const neighbor = ny * width + nx;
-            if (this._mask[neighbor]) {
-              this._mask[neighbor] = 0;
-              this._queue[tail++] = neighbor;
-            }
-          }
+        const p = this._queue[head++], x = p % w, y = Math.floor(p / w);
+        area++; sumX += x + .5; sumY += y + .5;
+        if (this._nearReferenceEdge(x, y)) edgeArea++;
+        left = Math.min(left, x); right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y);
+        for (let yy = Math.max(0, y - 1); yy <= Math.min(h - 1, y + 1); yy++) for (let xx = Math.max(0, x - 1); xx <= Math.min(w - 1, x + 1); xx++) {
+          const q = yy * w + xx;
+          if (this._mask[q]) { this._mask[q] = 0; this._queue[tail++] = q; }
         }
       }
-      const spanX = right - left + 1;
-      const spanY = bottom - top + 1;
-      const elongated = Math.max(spanX, spanY) > Math.min(spanX, spanY) * 5;
-      if (area >= minArea && area <= maxArea && !elongated) {
-        components.push({ x: sumX / area / width, y: sumY / area / height, area });
-      } else if (area >= minArea) {
-        rejectedArea += area;
-      }
-    }
-    if (components.length !== 1 || rejectedArea >= minArea) {
-      this._pending = null;
-      return { status: components.length || rejectedArea ? 'movement' : 'stable', changedPixels };
+      edgeChanged += edgeArea;
+      const sx = right - left + 1, sy = bottom - top + 1;
+      const compact = Math.max(sx, sy) <= Math.min(sx, sy) * 5 && area / (sx * sy) >= .22;
+      if (area >= minArea && area <= maxArea && compact) {
+        components.push({ x: sumX / area / w, y: sumY / area / h, area });
+        if (area - edgeArea >= minArea) offEdgeCandidates++;
+      } else if (area >= minArea) rejectedArea += area;
     }
 
-    const candidate = components[0];
-    const pending = this._pending;
-    const proximity = Math.max(3, Math.sqrt(candidate.area) / 2);
-    const samePosition = pending && Math.hypot(
-      (pending.x - candidate.x) * width,
-      (pending.y - candidate.y) * height,
-    ) <= proximity;
-    const sameSize = pending && candidate.area / pending.area >= 0.5
-      && candidate.area / pending.area <= 2;
-    const contiguous = pending && Number.isFinite(nowMs)
-      && nowMs >= pending.time && nowMs - pending.time < 2000;
-    const frames = samePosition && sameSize && contiguous ? pending.frames + 1 : 1;
-    this._pending = { ...candidate, frames, time: nowMs };
-    if (frames < stableFrames) return { status: 'waiting', changedPixels };
-
-    this._emitted = true;
-    return { status: 'candidate', candidate, changedPixels };
+    if (!widespread && components.length === 1 && rejectedArea < minArea) {
+      this._recovery = null;
+      const candidate = components[0], previous = this._pending;
+      const near = previous && Math.hypot((previous.x - candidate.x) * w, (previous.y - candidate.y) * h) <= Math.max(3, Math.sqrt(candidate.area) / 2);
+      const sameSize = previous && candidate.area / previous.area >= .5 && candidate.area / previous.area <= 2;
+      const contiguous = previous && Number.isFinite(nowMs) && nowMs >= previous.time && nowMs - previous.time < 2000;
+      const frames = near && sameSize && contiguous ? previous.frames + 1 : 1;
+      this._pending = { ...candidate, frames, time: nowMs };
+      if (frames < stableFrames) return result('waiting', changedPixels);
+      this._emitted = true;
+      return result('candidate', changedPixels, { candidate });
+    }
+    this._pending = null;
+    if (!components.length && rejectedArea < minArea) {
+      this._recovery = null;
+      return result('stable', changedPixels);
+    }
+    // Only a distributed edge-quality change with preserved geometry is safe
+    // to absorb automatically. Disconnected plausible marks are not a reset.
+    const qualityChange = reliable && aligned.confidence >= .82
+      && (aligned.edgeRatio < .85 || aligned.edgeRatio > 1.18)
+      && edgeChanged / changedPixels >= .9 && offEdgeCandidates === 0
+      && (widespread || rejectedArea >= maxArea);
+    if (qualityChange) {
+      if (this._recover(current, c, aligned, nowMs)) return result('recovered', changedPixels, { reason: 'image-quality' });
+      return result('movement', changedPixels, { reason: 'settling' });
+    }
+    this._recovery = null;
+    return result('movement', changedPixels, { reason: components.length > 1 ? 'ambiguous' : 'scene' });
   }
 }

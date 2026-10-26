@@ -89,3 +89,158 @@ test('ignores changes outside the target and transient marks', () => {
   assert.equal(detector.analyze(frame(), calibration, {}, 100).status, 'stable');
   assert.equal(detector.analyze(mark, calibration, {}, 200).status, 'waiting');
 });
+
+function rings(size = 100) {
+  const image = frame(205, size);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const r = Math.hypot(x + .5 - size / 2, y + .5 - size / 2);
+    const line = [5, 10, 15, 20, 25, 30, 35, 40, 44].some(radius => Math.abs(r - radius * size / 100) < .85 * size / 100);
+    const value = line ? 40 : 205;
+    const p = (y * size + x) * 4;
+    image.data[p] = image.data[p + 1] = image.data[p + 2] = value;
+  }
+  return image;
+}
+
+function translated(image, dx, dy) {
+  const output = frame(205, image.width);
+  for (let y = 0; y < image.height; y++) for (let x = 0; x < image.width; x++) {
+    const xx = x - dx, yy = y - dy;
+    if (xx < 0 || yy < 0 || xx >= image.width || yy >= image.height) continue;
+    const p = (y * image.width + x) * 4, q = (yy * image.width + xx) * 4;
+    output.data.set(image.data.subarray(q, q + 4), p);
+  }
+  return output;
+}
+
+function blurred(image, radius = 1) {
+  const output = frame(205, image.width);
+  for (let y = 0; y < image.height; y++) for (let x = 0; x < image.width; x++) {
+    let sum = 0, count = 0;
+    for (let yy = Math.max(0, y - radius); yy <= Math.min(image.height - 1, y + radius); yy++) {
+      for (let xx = Math.max(0, x - radius); xx <= Math.min(image.width - 1, x + radius); xx++) {
+        sum += image.data[(yy * image.width + xx) * 4]; count++;
+      }
+    }
+    const p = (y * image.width + x) * 4;
+    output.data[p] = output.data[p + 1] = output.data[p + 2] = Math.round(sum / count);
+  }
+  return output;
+}
+
+test('registers a small translated patterned image without inventing a mark', () => {
+  const detector = new ChangeDetector(100, 100), original = rings();
+  detector.setReference(original);
+  const result = detector.analyze(translated(original, 3, -2), calibration, {}, 0);
+  assert.equal(result.status, 'stable');
+  assert.deepEqual(result.alignment, { x: .03, y: -.02 });
+});
+
+test('retains a real localized change while compensating a small translation', () => {
+  const detector = new ChangeDetector(100, 100), original = rings();
+  detector.setReference(original);
+  const changed = paint(translated(original, 2, 3), 48, 50, 3, 3, 0);
+  let result;
+  for (let i = 0; i < 3; i++) result = detector.analyze(changed, calibration, {}, i * 150);
+  assert.equal(result.status, 'candidate');
+  assert.deepEqual(result.alignment, { x: .02, y: .03 });
+  assert.ok(Math.abs(result.candidate.x - .475) < .012);
+  assert.ok(Math.abs(result.candidate.y - .485) < .012);
+});
+
+test('suppresses scattered isolated sensor pixels', () => {
+  const detector = new ChangeDetector(100, 100), original = frame();
+  detector.setReference(original);
+  const noisy = frame();
+  for (let y = 15; y < 90; y += 6) for (let x = 15; x < 90; x += 6) paint(noisy, x, y, 1, 1, 0);
+  const result = detector.analyze(noisy, calibration, {}, 0);
+  assert.equal(result.status, 'stable');
+  assert.equal(result.changedPixels, 0);
+});
+
+test('recovers from a settled focus change and detects the next mark', () => {
+  const detector = new ChangeDetector(100, 100), original = rings();
+  detector.setReference(original);
+  const settled = blurred(original);
+  let result, recovered = 0;
+  for (let i = 0; i < 12; i++) {
+    result = detector.analyze(settled, calibration, {}, i * 150);
+    if (result.status === 'recovered') recovered++;
+    assert.notEqual(result.status, 'candidate');
+  }
+  assert.equal(recovered, 1);
+  assert.equal(result.status, 'stable');
+  const mark = paint(blurred(original), 48, 48, 3, 3, 0);
+  for (let i = 0; i < 3; i++) result = detector.analyze(mark, calibration, {}, 2000 + i * 150);
+  assert.equal(result.status, 'candidate');
+});
+
+test('does not reset continuously moving or changing blurred images', () => {
+  const detector = new ChangeDetector(100, 100), original = rings();
+  detector.setReference(original);
+  const soft = blurred(original);
+  for (let i = 0; i < 30; i++) {
+    const result = detector.analyze(translated(soft, i % 2 ? 2 : -2, 0), calibration, {}, i * 150);
+    assert.notEqual(result.status, 'recovered');
+    assert.notEqual(result.status, 'candidate');
+  }
+});
+
+test('a transient geometry disruption does not absorb a later isolated mark', () => {
+  const detector = new ChangeDetector(100, 100), original = rings();
+  detector.setReference(original);
+  detector.analyze(translated(original, 12, 9), calibration, {}, 0);
+  const changed = paint(rings(), 48, 48, 3, 3, 0);
+  let result;
+  for (let i = 0; i < 3; i++) result = detector.analyze(changed, calibration, {}, 500 + i * 150);
+  assert.equal(result.status, 'candidate');
+});
+
+test('multiple plausible localized changes are not silently adopted', () => {
+  const detector = new ChangeDetector(100, 100);
+  detector.setReference(frame());
+  const multiple = paint(paint(frame(), 40, 40, 3, 3, 30), 60, 60, 3, 3, 30);
+  for (let i = 0; i < 30; i++) {
+    const result = detector.analyze(multiple, calibration, {}, i * 150);
+    assert.equal(result.status, 'movement');
+    assert.equal(result.reason, 'ambiguous');
+  }
+});
+
+test('out-of-range image translation requests calibration instead of resetting', () => {
+  const detector = new ChangeDetector(100, 100), original = rings();
+  detector.setReference(original);
+  for (let i = 0; i < 12; i++) {
+    const result = detector.analyze(translated(original, 12, 9), calibration, {}, i * 150);
+    assert.equal(result.status, 'recalibrate');
+  }
+});
+
+
+test('a focus change with distinct new marks never absorbs those marks during recovery', () => {
+  const detector = new ChangeDetector(320, 320), original = rings(320);
+  detector.setReference(original);
+  const soft = blurred(original, 2);
+  paint(soft, 157, 157, 5, 5, 0);
+  paint(soft, 191, 191, 5, 5, 0);
+  for (let i = 0; i < 16; i++) {
+    const result = detector.analyze(soft, calibration, {}, i * 150);
+    assert.notEqual(result.status, 'recovered');
+  }
+});
+
+
+test('compensates camera contrast and brightness changes without hiding a new mark', () => {
+  const detector = new ChangeDetector(100, 100), original = rings();
+  detector.setReference(original);
+  const exposed = rings();
+  for (let p = 0; p < exposed.data.length; p += 4) {
+    const value = Math.round(exposed.data[p] * .72 + 12);
+    exposed.data[p] = exposed.data[p + 1] = exposed.data[p + 2] = value;
+  }
+  assert.equal(detector.analyze(exposed, calibration, {}, 0).status, 'stable');
+  paint(exposed, 48, 48, 3, 3, 0);
+  let result;
+  for (let i = 0; i < 3; i++) result = detector.analyze(exposed, calibration, {}, 200 + i * 150);
+  assert.equal(result.status, 'candidate');
+});
