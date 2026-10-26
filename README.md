@@ -1,8 +1,10 @@
 # Meta — glasovni rezultati
 
-Verzija 0.3.1: dva oblika mete — kružna i ovalna — s podesivim bodovnim rasponom za oba oblika. Automatski prijedlog i direktno podešavanje linija rade s odabranim brojem zona.
+Verzija 0.3.2: dva oblika mete — kružna i ovalna — s podesivim bodovnim rasponom za oba oblika. Automatski prijedlog i direktno podešavanje linija rade s odabranim brojem zona.
 
 Web prototip za pasivno očitavanje vidljivih promjena na papirnoj meti. Kamera, obrada slike i glasovne objave rade u pregledniku na telefonu. Aplikacija nema backend niti šalje slike na server.
+
+Zumiranje stranice gestama i slučajno označavanje teksta su isključeni. Stranica se i dalje može normalno pomicati, vrijednosti polja ostaju uređive, a klizač **Uvećanje** upravlja zumom kamere.
 
 ## Korištenje
 

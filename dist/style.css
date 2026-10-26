@@ -22,3 +22,9 @@ body.editing-target{overflow:hidden}
 @media(pointer:coarse),(max-width:760px){#targetEditor select,#targetEditor input{font-size:16px}}
 
 .editor-range-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px}.editor-range-row label{font-size:11px;color:var(--muted)}.editor-range-row select{min-width:0;width:54%;min-height:42px;font-size:12px}.view-panel.is-editing .editor-range-row select{font-size:16px}
+
+/* Fixed page scale and no accidental text selection while handling the target. */
+html,body,.app-shell,.editor-controls,.shot-list{touch-action:pan-x pan-y}
+*{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+input:not([type=range]):not([type=checkbox]),textarea,[contenteditable=true]{-webkit-user-select:text;user-select:text;-webkit-touch-callout:default}
+@media(pointer:coarse),(max-width:760px){input:not([type=range]):not([type=checkbox]),select,textarea{font-size:16px!important}}

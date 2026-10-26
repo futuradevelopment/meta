@@ -31,6 +31,19 @@ let toastTimer;
 let zoomTimer;
 const phrases = ['Izvan krugova', 'jedan', 'dva', 'tri', 'četiri', 'pet', 'šest', 'sedam', 'osam', 'devet', 'deset'];
 
+// Keep touch gestures on the app at a fixed page scale. Camera zoom remains
+// controlled independently by its slider. Do not cancel single-finger input.
+const preventPageGesture = event => { if (event.cancelable) event.preventDefault(); };
+for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+  document.addEventListener(type, preventPageGesture, { passive: false });
+}
+document.addEventListener('touchmove', event => {
+  if (event.touches.length > 1) preventPageGesture(event);
+}, { passive: false });
+document.addEventListener('selectstart', event => {
+  if (!event.target.closest?.('input, textarea, [contenteditable="true"]')) preventPageGesture(event);
+});
+
 function toast(message) {
   $('toast').textContent = message;
   $('toast').hidden = false;
