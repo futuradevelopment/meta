@@ -1,19 +1,43 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { contourPoint, normalizedDistance } from './dist/geometry.js';
+import { contourPoint, normalizedDistance, scorePoint } from './dist/geometry.js';
 import { targetPreset, guideHandles, hitTestGuide, beginGuideDrag, moveGuideDrag, adjustGuide, geometryFitsFrame } from './dist/editor.js';
 
 const near = (actual, expected, epsilon = 1e-9) => assert.ok(Math.abs(actual - expected) < epsilon, `${actual} should be near ${expected}`);
 const shifted = (point, x, y) => ({ x: point.x + x, y: point.y + y });
+// Ellipse geometry remains supported internally without exposing a third preset.
+const ellipseGeometry = () => ({ ...targetPreset('oval'), shape: 'ellipse', exponent: 2, rings: targetPreset().rings });
 
-test('presets have independent concentric rings and the requested geometry', () => {
-  const circle = targetPreset('circle'), ellipse = targetPreset('ellipse'), oval = targetPreset('oval');
-  assert.equal(circle.rings.length, 10); assert.equal(ellipse.rings.length, 10); assert.equal(oval.rings.length, 5);
+test('the two presets default to circle 10–1 and oval 10–6 with independent geometry', () => {
+  const circle = targetPreset('circle'), oval = targetPreset('oval');
+  assert.equal(circle.rings.length, 10); assert.equal(oval.rings.length, 5);
   near(circle.radiusX, .425); near(circle.radiusY, .425);
-  near(ellipse.radiusX, .32); near(ellipse.radiusY, .425);
+  near(oval.radiusX, .32); near(oval.radiusY, .425);
   near(oval.exponent, 2.6);
   circle.rings[0] = .15;
   near(targetPreset().rings[0], .1);
+});
+
+test('unsupported presets fall back to circle and invalid score endpoints retain shape defaults', () => {
+  assert.deepEqual(targetPreset('ellipse'), targetPreset('circle'));
+  assert.deepEqual(targetPreset('unknown'), targetPreset('circle'));
+  assert.equal(targetPreset('ellipse', 7).rings.length, 4);
+  for (const endpoint of [0, 10, 2.5, NaN]) {
+    assert.equal(targetPreset('circle', endpoint).rings.length, 10);
+    assert.equal(targetPreset('oval', endpoint).rings.length, 5);
+  }
+});
+
+test('both shapes support chosen score endpoints including 10–7, 10–5 and both range limits', () => {
+  for (const shape of ['circle', 'oval']) for (const endpoint of [1, 5, 7, 9]) {
+    const c = targetPreset(shape, endpoint);
+    assert.equal(c.rings.length, 11 - endpoint);
+    assert.equal(c.rings.at(-1), 1);
+    const outer = contourPoint(2.2, .99, c), outside = contourPoint(2.2, 1.01, c);
+    assert.equal(scorePoint(c.cx, c.cy, c), 10);
+    assert.equal(scorePoint(outer.x, outer.y, c), endpoint);
+    assert.equal(scorePoint(outside.x, outside.y, c), 0);
+  }
 });
 
 test('hit tests use actual contour distance on a rotated narrow oval', () => {
@@ -30,7 +54,7 @@ test('hit tests use actual contour distance on a rotated narrow oval', () => {
 });
 
 test('visible handles win outer-contour hits and selected rings only win near ties', () => {
-  const c = targetPreset('ellipse'), handles = guideHandles(c);
+  const c = ellipseGeometry(), handles = guideHandles(c);
   for (const kind of ['center', 'width', 'height', 'rotation']) assert.deepEqual(hitTestGuide(handles[kind].x, handles[kind].y, c), { kind });
   const close = { ...targetPreset(), rings: [.45, .5, 1] };
   const point = contourPoint(Math.PI, .475, close);
@@ -78,7 +102,7 @@ test('inner ring drag preserves initial touch offset and cannot cross either nei
 });
 
 test('outer contour drag scales both axes proportionally with bounded axes and unchanged ring factors', () => {
-  const c = { ...targetPreset('ellipse'), rotation: -20 };
+  const c = { ...ellipseGeometry(), rotation: -20 };
   const start = contourPoint(2.3, 1.03, c);
   const drag = beginGuideDrag({ kind: 'ring', index: 9 }, start, c);
   const moved = moveGuideDrag(drag, contourPoint(2.3, 1.23, c));
@@ -128,7 +152,7 @@ test('incremental controls clamp ring gaps, dimensions, centers, exponent and ro
   near(adjustGuide(c, 4, 'rotation', 190).rotation, -170);
   near(adjustGuide(c, 4, 'shape', 20).exponent, 8);
   near(adjustGuide(c, 4, 'shape', -20).exponent, 1);
-  near(adjustGuide(targetPreset('ellipse'), 9, 'shape', 2).exponent, 2);
+  near(adjustGuide(ellipseGeometry(), 9, 'shape', 2).exponent, 2);
   const circle = adjustGuide(targetPreset(), 9, 'height', .1);
   near(circle.radiusX, .525); near(circle.radiusY, .525);
 });

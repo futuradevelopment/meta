@@ -1,6 +1,6 @@
 # Meta — glasovni rezultati
 
-Verzija 0.3: kružne, eliptične i ovalne mete, automatski prijedlog kontura i direktno podešavanje crvenih linija na slici.
+Verzija 0.3.1: dva oblika mete — kružna i ovalna — s podesivim bodovnim rasponom za oba oblika. Automatski prijedlog i direktno podešavanje linija rade s odabranim brojem zona.
 
 Web prototip za pasivno očitavanje vidljivih promjena na papirnoj meti. Kamera, obrada slike i glasovne objave rade u pregledniku na telefonu. Aplikacija nema backend niti šalje slike na server.
 
@@ -9,11 +9,11 @@ Web prototip za pasivno očitavanje vidljivih promjena na papirnoj meti. Kamera,
 1. Otvori aplikaciju preko HTTPS-a, npr. u Safariju na iPhoneu.
 2. Za probu odaberi **Dodaj probni trag**. Demo slika prolazi kroz isti detektor promjena kao kamera.
 3. Za stvarnu sliku odaberi **Uključi kameru**, dozvoli pristup i namjesti kadar.
-4. Dodirni **Podesi linije** iznad kamere. U editoru odaberi **Kružna · 10–1**, **Eliptična · 10–1** ili **Ovalna · 10–6** za metu s pet izduženih kontura.
+4. Dodirni **Podesi linije** iznad kamere. U editoru odaberi **Kružna** ili **Ovalna**. Početni raspon je 10–1 za kružnu i 10–6 za ovalnu. U polju **Bodovni raspon** za oba oblika možeš odabrati raspon od 10–1 do 10–9, uključujući 10–7 (četiri linije) i 10–5 (šest linija).
 5. Dodirni **Prepoznaj linije** za automatski prijedlog. Provjeri rezultat: dodirni crvenu liniju i povuci je da promijeniš veličinu. Centar pomjera cijeli raspored; bijele ručice podešavaju širinu, visinu i nagib. Tipke **− / +** služe za fine ispravke odabrane vrijednosti.
 6. Dodirni **Primijeni**, pa **Pokreni praćenje**. Dostupni su glasovni rezultati, ručna potvrda očitanja, pregled serije i CSV izvoz.
 
-Podešavanje se otvara preko cijelog ekrana, uz zadržanu sliku i pauzirano praćenje. Automatski prijedlog ne mijenja primijenjene linije dok ne potvrdiš **Primijeni**. **Odustani** vraća prethodni raspored. Ranije zabilježeni rezultati ostaju isti. Razmaci pojedinačnih linija mogu se dodatno unijeti u **Razmaci linija**, unutar editora. U demo prikazu odabir oblika mijenja i simuliranu papirnu metu.
+Podešavanje se otvara preko cijelog ekrana, uz zadržanu sliku i pauzirano praćenje. Automatski prijedlog ne mijenja primijenjene linije dok ne potvrdiš **Primijeni**. **Odustani** vraća prethodni raspored. Ranije zabilježeni rezultati ostaju isti. Promjena bodovnog raspona zadržava centar, širinu, visinu i nagib, a novi broj linija početno raspoređuje ravnomjerno; zatim ih prepoznaj ili poravnaj ručno. Promjena oblika postavlja njegov početni raspon, dok **Vrati krugove** zadržava trenutno odabrani raspon. Razmaci pojedinačnih linija mogu se dodatno unijeti u **Razmaci linija**, unutar editora. U demo prikazu odabir oblika mijenja i simuliranu papirnu metu.
 
 Dok podešavanje krugova nije aktivno, dodir slike šalje zahtjev za fokus ako ga preglednik i odabrana kamera podržavaju. Dugme **Fokus u centru** radi istu radnju za centar kadra. Ako podrška ne postoji, aplikacija to jasno navodi i ne prikazuje lažnu potvrdu fokusiranja. Standardni Safari trenutno ne izlaže sve potrebne kontrole; fokusom tada upravlja kamera.
 
@@ -52,7 +52,7 @@ Testovi pokrivaju geometriju i bodovanje različitih oblika, detektor promjena, 
 ## Granice prototipa
 
 - Bodovi su procjena prema centru detektovane promjene, a ne službeno bodovanje dodira ruba kruga.
-- Detektor radi unutar podešene vanjske konture. Kružni i eliptični predložak imaju deset zona (10–1), a ovalni pet (10–6).
+- Detektor radi unutar podešene vanjske konture. Bodovi počinju od 10 i opadaju za jedan po liniji; odabrani raspon određuje broj linija za prikaz, prepoznavanje i bodovanje.
 - Automatsko prepoznavanje traži koncentrične konture na uglavnom frontalnoj i dobro vidljivoj meti. Rezultat je prijedlog za ručnu provjeru; jaka perspektiva, odsječene linije, sjene ili oštećenja mogu spriječiti dobar prijedlog.
 - Oval je prilagodljiv zaobljeni oblik sa zajedničkim centrom i proporcijama svih linija. To nije tačna rekonstrukcija proizvoljne štampane konture; zaobljenost i razmake treba provjeriti prema konkretnoj meti.
 - Kamera, izbor objektiva i zum zavise od preglednika. Ako preglednik ne izloži zum kamere, koristi se digitalno uvećanje.

@@ -20,3 +20,5 @@
 body.editing-target{overflow:hidden}
 @media(max-width:760px) and (orientation:portrait){.view-panel.is-editing .camera-frame{height:min(100%,calc(100vw - 24px));width:auto;max-width:calc(100vw - 24px);max-height:calc(100vw - 24px)}}
 @media(pointer:coarse),(max-width:760px){#targetEditor select,#targetEditor input{font-size:16px}}
+
+.editor-range-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px}.editor-range-row label{font-size:11px;color:var(--muted)}.editor-range-row select{min-width:0;width:54%;min-height:42px;font-size:12px}.view-panel.is-editing .editor-range-row select{font-size:16px}

@@ -349,6 +349,7 @@ function syncEditor(rebuild = false) {
   const c = normalizeCalibration(e.draft); e.draft = c;
   e.selected = Math.max(0, Math.min(c.rings.length - 1, e.selected));
   $('targetPreset').value = c.shape;
+  $('scoreEndSelect').value = String(11 - c.rings.length);
   if (rebuild) {
     $('selectedRing').replaceChildren();
     c.rings.forEach((_r, i) => $('selectedRing').add(new Option(`${10 - i} bodova${i === c.rings.length - 1 ? ' · vanjska' : ''}`, String(i))));
@@ -361,7 +362,7 @@ function syncEditor(rebuild = false) {
   const sizeValue = e.selected === c.rings.length - 1 ? `${(c.radiusX * 200).toFixed(1)} × ${(c.radiusY * 200).toFixed(1)}%` : `${(c.rings[e.selected] * 100).toFixed(1)}%`;
   const values = {size:sizeValue,width:`${(c.radiusX * 200).toFixed(1)}%`,height:`${(c.radiusY * 200).toFixed(1)}%`,rotation:`${c.rotation.toFixed(1)}°`,centerX:`${(c.cx * 100).toFixed(1)}%`,centerY:`${(c.cy * 100).toFixed(1)}%`,shape:c.exponent.toFixed(1)};
   $('editorValue').textContent = values[action];
-  for (const id of ['autoLinesButton','applyLinesButton','targetPreset','selectedRing','editorAction','resetCalibrationButton']) $(id).disabled = !!e.busy;
+  for (const id of ['autoLinesButton','applyLinesButton','targetPreset','scoreEndSelect','selectedRing','editorAction','resetCalibrationButton']) $(id).disabled = !!e.busy;
   $('minusButton').disabled = $('plusButton').disabled = !!e.busy || (action === 'shape' && c.shape !== 'oval');
 }
 
@@ -382,7 +383,7 @@ function calibrate() {
   $('adjustLinesButton').setAttribute('aria-expanded', 'true');
   canvas.style.cursor = 'grab'; canvas.style.touchAction = 'none';
   $('editorAction').value = 'size';
-  $('editorHint').textContent = 'Odaberi oblik i dodirni „Prepoznaj linije“. Zatim povuci liniju ili bijele ručice. Slika je zadržana do završetka.';
+  $('editorHint').textContent = 'Odaberi oblik i bodovni raspon, pa dodirni „Prepoznaj linije“. Povuci linije za ispravku. Slika je zadržana do završetka.';
   syncEditor(true);
   $('targetPreset').focus?.();
 }
@@ -421,6 +422,21 @@ function changeTargetPreset() {
   e.selected = e.draft.rings.length - 1;
   if (state.mode === 'demo') { state.demoTarget = targetPreset(preset.shape); state.marks = []; drawDemo(); }
   $('editorHint').textContent = 'Oblik je odabran. Dodirni „Prepoznaj linije“ ili povuci crvene linije na štampane konture.';
+  syncEditor(true);
+}
+
+function changeScoreRange() {
+  const e = state.editor;
+  if (!e || e.busy) return;
+  const end = Number($('scoreEndSelect').value);
+  if (!Number.isInteger(end) || end < 1 || end > 9) { syncEditor(); return; }
+  const preset = targetPreset(e.draft.shape, end);
+  if (e.draft.rings.length === preset.rings.length) return;
+  e.draft = { ...e.draft, rings: preset.rings };
+  e.selected = Math.min(e.selected, e.draft.rings.length - 1);
+  if (state.mode === 'demo') { state.demoTarget = { ...state.demoTarget, rings: [...preset.rings] }; state.marks = []; drawDemo(); }
+  const noun = preset.rings.length <= 4 ? 'linije' : 'linija';
+  $('editorHint').textContent = `Raspon 10–${end}: ${preset.rings.length} ${noun}. Razmaci su postavljeni ravnomjerno; prepoznaj ili prilagodi linije prije potvrde.`;
   syncEditor(true);
 }
 
@@ -651,6 +667,7 @@ $('calibrationButton').addEventListener('click', calibrate);
 $('focusButton').addEventListener('click', () => focusAt(.5, .5));
 $('adjustLinesButton').addEventListener('click', calibrate);
 $('targetPreset').addEventListener('change', changeTargetPreset);
+$('scoreEndSelect').addEventListener('change', changeScoreRange);
 $('autoLinesButton').addEventListener('click', recognizeLines);
 $('applyLinesButton').addEventListener('click', () => closeEditor(true));
 $('cancelLinesButton').addEventListener('click', () => closeEditor(false));
@@ -660,7 +677,7 @@ $('minusButton').addEventListener('click', () => fineAdjust(-1));
 $('plusButton').addEventListener('click', () => fineAdjust(1));
 $('resetCalibrationButton').addEventListener('click', () => {
   if (!state.editor || state.editor.busy) return;
-  state.editor.draft = targetPreset($('targetPreset').value); state.editor.selected = state.editor.draft.rings.length - 1;
+  state.editor.draft = targetPreset($('targetPreset').value, 11 - state.editor.draft.rings.length); state.editor.selected = state.editor.draft.rings.length - 1;
   syncEditor(true);
 });
 $('zoomRange').addEventListener('input', () => {

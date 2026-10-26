@@ -21,9 +21,10 @@ function boundedCalibration(calibration) {
   return c;
 }
 
-export function targetPreset(shape = 'circle') {
-  const kind = ['circle', 'ellipse', 'oval'].includes(shape) ? shape : 'circle';
-  const count = kind === 'oval' ? 5 : 10;
+export function targetPreset(shape = 'circle', minScore) {
+  const kind = shape === 'oval' ? 'oval' : 'circle';
+  const end = Number.isInteger(minScore) && minScore >= 1 && minScore <= 9 ? minScore : kind === 'oval' ? 6 : 1;
+  const count = 11 - end;
   return normalizeCalibration({
     cx: .5, cy: .5, shape: kind, radius: .425,
     radiusX: kind === 'circle' ? .425 : .32, radiusY: .425,

@@ -80,6 +80,17 @@ function setup(options = {}) {
 
 const snapshot = value => JSON.parse(JSON.stringify(value));
 const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} should be near ${expected}`);
+const select = (app, id, value) => { const control = app.elements.get(id); control.value = String(value); return control.dispatch('change'); };
+
+test('the editor offers only circle and oval shapes with score endpoints 1 through 9', () => {
+  const optionValues = id => {
+    const selectMarkup = html.match(new RegExp(`<select\\b[^>]*\\bid="${id}"[^>]*>([\\s\\S]*?)<\\/select>`));
+    assert.ok(selectMarkup, `Missing ${id} selector`);
+    return [...selectMarkup[1].matchAll(/<option\b[^>]*\bvalue="([^"]+)"/g)].map(match => match[1]);
+  };
+  assert.deepEqual(optionValues('targetPreset'), ['circle', 'oval']);
+  assert.deepEqual(optionValues('scoreEndSelect').sort(), ['1', '2', '3', '4', '5', '6', '7', '8', '9']);
+});
 
 test('automatic candidate uses reference coordinates and adopts alignment once', () => {
   const app = setup();
@@ -224,6 +235,8 @@ test('Cancel preserves prior calibration, mismatch, alignment, history and demo 
   near(app.state.editor.draft.cx, .525); near(app.state.editor.draft.cy, .485);
   app.elements.get('targetPreset').value = 'oval';
   app.elements.get('targetPreset').dispatch('change');
+  select(app, 'scoreEndSelect', 5);
+  assert.equal(app.state.editor.draft.rings.length, 6);
   app.elements.get('plusButton').dispatch('click');
   app.elements.get('cancelLinesButton').dispatch('click');
   assert.deepEqual(snapshot({ calibration: app.state.calibration, alignment: app.state.alignment, geometryMismatch: app.state.geometryMismatch, shots: app.state.shots, demoTarget: app.state.demoTarget, marks: app.state.marks }), original);
@@ -254,24 +267,119 @@ test('applying the five-line oval preset preserves historical scores and scores 
 });
 
 test('automatic recognition proposes draft geometry and requires Apply before it affects scoring', async () => {
-  const proposed = { ...targetPreset('ellipse'), cx: .48, cy: .51, radiusX: .3, radiusY: .39, rotation: 12 };
+  const proposed = { ...targetPreset('oval', 7), cx: .48, cy: .51, radiusX: .3, radiusY: .39, rotation: 12 };
   let calls = 0;
-  const app = setup({ recognize: (image, seed) => { calls++; assert.equal(image.width, 320); assert.equal(seed.shape, 'circle'); return { status: 'suggested', calibration: proposed }; } });
+  const app = setup({ recognize: (image, seed) => {
+    calls++; assert.equal(image.width, 320); assert.equal(seed.shape, 'oval'); assert.equal(seed.rings.length, 4);
+    return { status: 'suggested', calibration: proposed };
+  } });
   const original = snapshot(app.state.calibration), references = app.detector.referenceCount;
   app.calibrate();
+  select(app, 'targetPreset', 'oval'); select(app, 'scoreEndSelect', 7);
   const job = app.elements.get('autoLinesButton').dispatch('click');
   assert.equal(app.elements.get('applyLinesButton').disabled, true);
   await job;
   assert.equal(calls, 1);
   assert.deepEqual(snapshot(app.state.calibration), original);
-  assert.equal(app.state.editor.draft.shape, 'ellipse');
+  assert.equal(app.state.editor.draft.shape, 'oval');
+  assert.equal(app.state.editor.draft.rings.length, 4);
+  assert.equal(app.elements.get('scoreEndSelect').value, '7');
   near(app.state.editor.draft.cx, .48);
   assert.equal(app.detector.referenceCount, references);
   assert.equal(app.elements.get('applyLinesButton').disabled, false);
   app.elements.get('applyLinesButton').dispatch('click');
-  assert.equal(app.state.calibration.shape, 'ellipse');
+  assert.equal(app.state.calibration.shape, 'oval');
+  assert.equal(app.state.calibration.rings.length, 4);
   near(app.state.calibration.cx, .48);
 });
+
+for (const shape of ['circle', 'oval']) for (const endpoint of [7, 5]) {
+  test(`${shape} range 10–${endpoint} preserves fitted geometry and scores the outer zone after Apply`, () => {
+    const app = setup(); app.calibrate();
+    select(app, 'targetPreset', shape);
+    for (const action of ['centerX', 'centerY', 'width', 'rotation', ...(shape === 'oval' ? ['shape'] : [])]) {
+      select(app, 'editorAction', action); app.elements.get('plusButton').dispatch('click');
+    }
+    const geometry = snapshot(app.state.editor.draft); delete geometry.rings;
+    const previousSelection = app.state.editor.selected;
+    const drawings = app.rawCanvas.calls.fillRect;
+    select(app, 'scoreEndSelect', endpoint);
+    const after = snapshot(app.state.editor.draft); delete after.rings;
+    assert.deepEqual(after, geometry);
+    assert.equal(app.state.editor.draft.rings.length, 11 - endpoint);
+    assert.equal(app.state.editor.selected, Math.min(previousSelection, 10 - endpoint));
+    assert.equal(app.elements.get('selectedRing').children.length, 11 - endpoint);
+    assert.equal(app.state.demoTarget.rings.length, 11 - endpoint);
+    assert.ok(app.rawCanvas.calls.fillRect > drawings);
+    assert.equal(app.state.calibration.rings.length, 10);
+    app.elements.get('applyLinesButton').dispatch('click');
+    assert.equal(app.state.editor, null);
+    assert.equal(app.state.calibration.shape, shape);
+    assert.equal(app.state.calibration.rings.length, 11 - endpoint);
+    app.start();
+    const point = contourPoint(2.1, .95, app.state.calibration);
+    app.tick(2000, { status: 'candidate', candidate: { ...point, area: 10 }, alignment: { x: 0, y: 0 } });
+    assert.equal(app.state.shots.at(-1).score, endpoint);
+  });
+}
+
+test('changing shape restores that shape’s default score range', () => {
+  const app = setup(); app.calibrate();
+  assert.equal(app.elements.get('scoreEndSelect').value, '1');
+  select(app, 'scoreEndSelect', 7);
+  select(app, 'targetPreset', 'oval');
+  assert.equal(app.elements.get('scoreEndSelect').value, '6');
+  assert.equal(app.state.editor.draft.rings.length, 5);
+  select(app, 'scoreEndSelect', 5);
+  select(app, 'targetPreset', 'circle');
+  assert.equal(app.elements.get('scoreEndSelect').value, '1');
+  assert.equal(app.state.editor.draft.rings.length, 10);
+});
+
+for (const shape of ['circle', 'oval']) {
+  test(`${shape} reset preserves the chosen score range after manual edits`, () => {
+    const app = setup(); app.calibrate();
+    select(app, 'targetPreset', shape); select(app, 'scoreEndSelect', 7);
+    select(app, 'selectedRing', 1); app.elements.get('plusButton').dispatch('click');
+    assert.notEqual(app.state.editor.draft.rings[1], .5);
+    select(app, 'editorAction', 'centerX'); app.elements.get('plusButton').dispatch('click');
+    app.elements.get('resetCalibrationButton').dispatch('click');
+    assert.equal(app.state.editor.draft.shape, shape);
+    assert.equal(app.elements.get('scoreEndSelect').value, '7');
+    assert.deepEqual(snapshot(app.state.editor.draft.rings), [.25, .5, .75, 1]);
+    assert.equal(app.elements.get('selectedRing').children.length, 4);
+    assert.equal(app.state.demoTarget.rings.length, 4);
+  });
+
+  test(`${shape} Cancel restores the applied score range and matching demo image`, () => {
+    const app = setup(); app.calibrate();
+    select(app, 'targetPreset', shape); select(app, 'scoreEndSelect', 7);
+    app.elements.get('applyLinesButton').dispatch('click');
+    const original = snapshot({ calibration: app.state.calibration, demoTarget: app.state.demoTarget });
+    app.calibrate();
+    select(app, 'scoreEndSelect', 5);
+    assert.equal(app.state.editor.draft.rings.length, 6);
+    assert.equal(app.state.demoTarget.rings.length, 6);
+    app.elements.get('cancelLinesButton').dispatch('click');
+    assert.deepEqual(snapshot({ calibration: app.state.calibration, demoTarget: app.state.demoTarget }), original);
+    app.calibrate();
+    assert.equal(app.elements.get('scoreEndSelect').value, '7');
+    assert.equal(app.state.editor.draft.rings.length, 4);
+  });
+
+  test(`${shape} automatic recognition receives the chosen six-line range in its seed`, async () => {
+    let seen;
+    const app = setup({ recognize: (_image, seed) => { seen = snapshot(seed); return { status: 'uncertain' }; } });
+    app.calibrate();
+    select(app, 'targetPreset', shape); select(app, 'scoreEndSelect', 5);
+    const draft = snapshot(app.state.editor.draft);
+    await app.elements.get('autoLinesButton').dispatch('click');
+    assert.equal(seen.shape, shape);
+    assert.equal(seen.rings.length, 6);
+    assert.deepEqual(snapshot(app.state.editor.draft), draft);
+    assert.equal(app.state.calibration.rings.length, 10);
+  });
+}
 
 test('a pending detection blocks opening the editor and remains available for confirmation', () => {
   const app = setup();

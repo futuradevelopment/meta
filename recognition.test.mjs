@@ -101,3 +101,30 @@ test('adjusts oval roundness from the observed contours', () => {
   close(result.calibration.exponent, c.exponent, .15, 'oval roundness');
   close(result.calibration.radiusY, c.radiusY, .015, 'vertical radius');
 });
+
+for (const shape of ['circle', 'oval']) {
+  for (const count of [2, 4, 6]) {
+    test(`measures ${shape} with ${count} rings (scores 10–${11 - count})`, () => {
+      const rings = Array.from({ length: count }, (_, i) => (i + 1) / count);
+      const c = { shape, cx: .52, cy: .48, radius: .42, radiusX: .34, radiusY: .43,
+        rotation: shape === 'circle' ? 0 : 9, exponent: 2.6, rings };
+      const seed = { shape, cx: .5, cy: .5, radius: .45, radiusX: .36, radiusY: .44, rings };
+      const result = suggestCalibration(target(c, 240, true), seed);
+      assert.equal(result.status, 'suggested');
+      assert.equal(result.calibration.shape, shape);
+      assert.equal(result.calibration.rings.length, count);
+      close(result.calibration.cx, c.cx, .015, 'center x');
+      close(result.calibration.cy, c.cy, .015, 'center y');
+      close(result.calibration.radiusX, shape === 'circle' ? c.radius : c.radiusX, .02, 'horizontal radius');
+      close(result.calibration.radiusY, shape === 'circle' ? c.radius : c.radiusY, .02, 'vertical radius');
+      result.calibration.rings.forEach((ring, i) => close(ring, rings[i], .03, `ring ${i}`));
+    });
+  }
+}
+
+test('does not calibrate from only one contour', () => {
+  const c = { shape: 'circle', radius: .44, rings: [1] };
+  const result = suggestCalibration(target(c), c);
+  assert.equal(result.status, 'not-found');
+  assert.equal(result.reason, 'insufficient-ring-count');
+});

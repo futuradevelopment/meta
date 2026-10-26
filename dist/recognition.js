@@ -92,7 +92,8 @@ function profile(image, c, count, detailed = false) {
   if (selected.length !== count) return { score: 0, peaks: selected };
   // A frame-filling set of nested outlines, rather than tiny concentric texture.
   const outer = selected[count - 1].r;
-  if (outer * Math.max(c.radiusX, c.radiusY) < .23 || selected[0].r / outer > .48) return { score: 0, peaks: selected };
+  const maxInnerRatio = count === 2 ? .75 : .48;
+  if (outer * Math.max(c.radiusX, c.radiusY) < .23 || selected[0].r / outer > maxInnerRatio) return { score: 0, peaks: selected };
   const strengths = selected.map(p => p.value).sort((a, b) => a - b);
   const mean = strengths.reduce((a, b) => a + b, 0) / count;
   return { score: mean * .7 + strengths[0] * .3, peaks: selected };
@@ -193,6 +194,7 @@ export function suggestCalibration(imageData, seedCalibration = {}) {
   const image = prepare(imageData), seed = normalizeCalibration(seedCalibration);
   const no = reason => ({ status: 'not-found', confidence: 0, reason });
   if (!image) return no('invalid-image');
+  if (seed.rings.length < 2) return no('insufficient-ring-count');
   if (image.energy < .18) return no('insufficient-lines');
   const fitted = fit(image, seed);
   if (!fitted || fitted.score < 3.5) return no('insufficient-lines');
