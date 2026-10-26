@@ -223,20 +223,23 @@ function drawRaw() {
   state.frameReady = true;
 }
 
+function strokeTargetGuide() {
+  // The white edge separates the red guide from dark printed target lines.
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3.5; ctx.stroke();
+  ctx.strokeStyle = '#e02020'; ctx.lineWidth = 2; ctx.stroke();
+}
+
 function drawOverlay(now) {
   const size = canvas.width;
   ctx.drawImage(raw, 0, 0, size, size);
   const c = { ...state.calibration, cx: state.calibration.cx + state.alignment.x, cy: state.calibration.cy + state.alignment.y };
   if ((state.calibrated && !state.geometryMismatch) || state.calibrating) {
     ctx.save();
-    ctx.strokeStyle = state.calibrating ? '#d7f879' : 'rgba(132,178,158,.58)';
-    ctx.lineWidth = 1.2;
     ctx.setLineDash(state.calibrating ? [5, 5] : []);
     if (state.calibrating !== 2) for (const r of c.rings) {
-      ctx.beginPath(); ctx.arc(c.cx * size, c.cy * size, c.radius * r * size, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(c.cx * size, c.cy * size, c.radius * r * size, 0, Math.PI * 2); strokeTargetGuide();
     }
-    ctx.strokeStyle = '#d7f879'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(c.cx * size - 8, c.cy * size); ctx.lineTo(c.cx * size + 8, c.cy * size); ctx.moveTo(c.cx * size, c.cy * size - 8); ctx.lineTo(c.cx * size, c.cy * size + 8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(c.cx * size - 8, c.cy * size); ctx.lineTo(c.cx * size + 8, c.cy * size); ctx.moveTo(c.cx * size, c.cy * size - 8); ctx.lineTo(c.cx * size, c.cy * size + 8); strokeTargetGuide();
     ctx.restore();
   }
   for (let i = 0; i < state.shots.length; i++) {

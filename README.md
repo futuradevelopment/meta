@@ -1,6 +1,6 @@
 # Meta — glasovni rezultati
 
-Verzija 0.2: oporavak nakon stabilizacije slike i provjera podrške za fokus na dodir.
+Verzija 0.2.1: crveni krugovi i oznaka centra s tankim bijelim obrubom za jasniji prikaz preko papirne mete. Uključuje oporavak nakon stabilizacije slike i provjeru podrške za fokus na dodir iz verzije 0.2.
 
 Web prototip za pasivno očitavanje vidljivih promjena na papirnoj meti. Kamera, obrada slike i glasovne objave rade u pregledniku na telefonu. Aplikacija nema backend niti šalje slike na server.
 
