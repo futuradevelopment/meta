@@ -1,31 +1,11 @@
 /**
  * Small, dependency-free image-change reader for a stationary paper surface.
- * Coordinates use normalized image space. Use a square analysis image for
- * circular calibration. This is a visible-change detector, not an event sensor.
+ * Coordinates use normalized image space and shared circle/ellipse/oval
+ * calibration. This is a visible-change detector, not an event sensor.
  */
 
-const DEFAULT_RINGS = Object.freeze(Array.from({ length: 10 }, (_, i) => (i + 1) / 10));
-
-function calibrationValues(calibration = {}) {
-  const cx = Number.isFinite(calibration.cx) ? calibration.cx : 0.5;
-  const cy = Number.isFinite(calibration.cy) ? calibration.cy : 0.5;
-  const radius = Number.isFinite(calibration.radius) && calibration.radius > 0
-    ? calibration.radius : 0.45;
-  const supplied = calibration.rings;
-  const valid = Array.isArray(supplied) && supplied.length === 10
-    && supplied.every((r, i) => Number.isFinite(r) && r > 0 && r <= 1
-      && (i === 0 || r > supplied[i - 1]));
-  return { cx, cy, radius, rings: valid ? supplied : DEFAULT_RINGS };
-}
-
-/** Score the center of a visible change, with inclusive ring boundaries. */
-export function scorePoint(x, y, calibration = {}) {
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return 0;
-  const { cx, cy, radius, rings } = calibrationValues(calibration);
-  const relativeDistance = Math.hypot(x - cx, y - cy) / radius;
-  const ring = rings.findIndex(r => relativeDistance <= r + 1e-9);
-  return ring < 0 ? 0 : 10 - ring;
-}
+import { normalizeCalibration, normalizedDistance } from './geometry.js';
+export { scorePoint } from './geometry.js';
 
 /**
  * Alignment is normalized CURRENT minus REFERENCE translation. Candidate
@@ -83,16 +63,16 @@ export class ChangeDetector {
   setReference(imageData) { this._adopt(this._read(imageData)); }
 
   _align(current, calibration, maxShift) {
-    const { cx, cy, radius } = calibration;
+    const { cx, cy, radius, shape, radiusX, radiusY, rotation, exponent, rings } = calibration;
     const w = this.width, h = this.height;
-    const key = [cx, cy, radius, maxShift].join('/');
+    const key = [cx, cy, radius, shape, radiusX, radiusY, rotation, exponent, rings.join(','), maxShift].join('/');
     const ref = this._referenceGradient;
     if (this._pointsKey !== key) {
       this._pointsKey = key; this._points = [];
       const stride = Math.max(2, Math.round(Math.min(w, h) / 120));
       for (let y = maxShift + 2; y < h - maxShift - 2; y += stride) {
         for (let x = maxShift + 2; x < w - maxShift - 2; x += stride) {
-          if (Math.hypot((x + .5) / w - cx, (y + .5) / h - cy) > radius) continue;
+          if (normalizedDistance((x + .5) / w, (y + .5) / h, calibration) > 1) continue;
           const p = y * w + x;
           if (Math.abs(ref.gx[p]) + Math.abs(ref.gy[p]) >= 30) this._points.push(p);
         }
@@ -129,7 +109,7 @@ export class ChangeDetector {
     const w = this.width, h = this.height;
     let samples = 0;
     for (let y = 1; y < h - 1; y += 3) for (let x = 1; x < w - 1; x += 3) {
-      if (Math.hypot((x + .5) / w - calibration.cx, (y + .5) / h - calibration.cy) > calibration.radius) continue;
+      if (normalizedDistance((x + .5) / w, (y + .5) / h, calibration) > 1) continue;
       if (x + dx < 0 || x + dx >= w || y + dy < 0 || y + dy >= h) continue;
       const p = y * w + x;
       const difference = Math.round(current[p + dy * w + dx] - this._reference[p] * gain);
@@ -148,7 +128,7 @@ export class ChangeDetector {
     const w = this.width, h = this.height;
     let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
     for (let y = 2; y < h - 2; y += 3) for (let x = 2; x < w - 2; x += 3) {
-      if (Math.hypot((x + .5) / w - calibration.cx, (y + .5) / h - calibration.cy) > calibration.radius) continue;
+      if (normalizedDistance((x + .5) / w, (y + .5) / h, calibration) > 1) continue;
       if (x + dx < 0 || x + dx >= w || y + dy < 0 || y + dy >= h) continue;
       const p = y * w + x, a = this._reference[p], b = current[p + dy * w + dx];
       n++; sx += a; sy += b; sxx += a * a; sxy += a * b;
@@ -179,7 +159,7 @@ export class ChangeDetector {
       let total = 0, difference = 0, changed = 0;
       const w = this.width, h = this.height;
       for (let y = 1; y < h - 1; y += 2) for (let x = 1; x < w - 1; x += 2) {
-        if (Math.hypot((x + .5) / w - calibration.cx, (y + .5) / h - calibration.cy) > calibration.radius) continue;
+        if (normalizedDistance((x + .5) / w, (y + .5) / h, calibration) > 1) continue;
         const p = y * w + x, delta = Math.abs(current[p] - previous.anchor[p]);
         difference += delta; total++; if (delta > 10) changed++;
       }
@@ -202,7 +182,7 @@ export class ChangeDetector {
     const minArea = Number.isFinite(options.minArea) ? Math.max(1, options.minArea) : 4;
     const maxArea = Number.isFinite(options.maxArea) ? Math.max(minArea, options.maxArea) : 250;
     const stableFrames = Number.isFinite(options.stableFrames) ? Math.max(1, Math.floor(options.stableFrames)) : 3;
-    const c = calibrationValues(calibration), { width: w, height: h } = this;
+    const c = normalizeCalibration(calibration), { width: w, height: h } = this;
     const maxShift = Math.min(5, Math.floor(Math.min(w, h) / 10));
     const aligned = this._align(current, c, maxShift);
     // Do not apply an arbitrary best offset if the patterns do not correspond.
@@ -215,7 +195,7 @@ export class ChangeDetector {
     this._mask.fill(0); this._cleanMask.fill(0);
     let regionPixels = 0;
     for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-      if (Math.hypot((x + .5) / w - c.cx, (y + .5) / h - c.cy) > c.radius) continue;
+      if (normalizedDistance((x + .5) / w, (y + .5) / h, c) > 1) continue;
       if (x + dx < 0 || x + dx >= w || y + dy < 0 || y + dy >= h) continue;
       const p = y * w + x; regionPixels++;
       if (Math.abs(current[p + dy * w + dx] - this._reference[p] * luminanceGain - lightShift) >= threshold) {

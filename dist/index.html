@@ -25,22 +25,46 @@
       </div>
 
       <div class="workspace">
-        <section class="view-panel" aria-label="Kamera i praćenje mete">
+        <section id="viewPanel" class="view-panel" aria-label="Kamera i praćenje mete">
+          <div id="editorToolbar" class="editor-toolbar"><div><span class="eyebrow">UREĐIVANJE METE</span><h2>Podesi linije na slici</h2></div><span class="editor-step">DODIRNI · POVUCI</span></div>
           <div class="view-toolbar">
             <div class="source-indicator"><span class="small-cross" aria-hidden="true">＋</span><span id="sourceBadge">DEMO</span></div>
-            <div class="source-actions"><button id="demoButton" class="button text-button" type="button">Demo</button><button id="cameraButton" class="button compact" type="button"><svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M3 5.5h3l1.2-2h5.6l1.2 2h3v11H3z"/><circle cx="10" cy="11" r="3"/></svg>Uključi kameru</button></div>
+            <div class="source-actions"><button id="demoButton" class="button text-button" type="button">Demo</button><button id="adjustLinesButton" class="button compact adjust-lines-button" type="button" aria-controls="targetEditor" aria-expanded="false"><svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><ellipse cx="10" cy="10" rx="5" ry="7"/><ellipse cx="10" cy="10" rx="2.5" ry="3.5"/></svg>Podesi linije</button><button id="cameraButton" class="button compact" type="button"><svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M3 5.5h3l1.2-2h5.6l1.2 2h3v11H3z"/><circle cx="10" cy="11" r="3"/></svg>Uključi kameru</button></div>
           </div>
           <div class="camera-frame">
             <canvas id="cameraView" width="640" height="640" aria-label="Prikaz papirne mete i označenih promjena"></canvas>
             <video id="sourceVideo" autoplay muted playsinline hidden></video>
             <span class="frame-corner top-left" aria-hidden="true"></span><span class="frame-corner top-right" aria-hidden="true"></span><span class="frame-corner bottom-left" aria-hidden="true"></span><span class="frame-corner bottom-right" aria-hidden="true"></span>
           </div>
+          <section id="targetEditor" class="target-editor" hidden aria-label="Podešavanje linija mete">
+            <div class="editor-controls">
+              <div class="editor-preset-row">
+                <label class="sr-only" for="targetPreset">Oblik i bodovni krugovi</label>
+                <select id="targetPreset"><option value="circle">Kružna · 10–1</option><option value="ellipse">Eliptična · 10–1</option><option value="oval">Ovalna · 10–6</option></select>
+                <button id="autoLinesButton" class="button compact" type="button"><svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M6 2H2v4M14 2h4v4M2 14v4h4M18 14v4h-4"/><ellipse cx="10" cy="10" rx="3" ry="5"/></svg>Prepoznaj linije</button>
+              </div>
+              <p id="editorHint" class="editor-hint" aria-live="polite">Dodirni liniju i povuci. Povuci centar za pomjeranje mete.</p>
+              <div class="editor-adjust-row">
+                <label class="sr-only" for="selectedRing">Odabrana bodovna linija</label>
+                <select id="selectedRing"><option value="0">Linija 10</option></select>
+                <label class="sr-only" for="editorAction">Šta želiš podesiti</label>
+                <select id="editorAction"><option value="size">Veličina</option><option value="width">Širina</option><option value="height">Visina</option><option value="rotation">Rotacija</option><option value="centerX">Pomak lijevo / desno</option><option value="centerY">Pomak gore / dolje</option><option value="shape">Zaobljenost</option></select>
+              </div>
+              <div class="editor-fine-row">
+                <button id="minusButton" class="button editor-step-button" type="button" aria-label="Smanji odabranu vrijednost">−</button>
+                <div class="editor-readout"><span id="editorParameterLabel">Veličina</span><output id="editorValue" aria-live="polite">—</output></div>
+                <button id="plusButton" class="button editor-step-button" type="button" aria-label="Povećaj odabranu vrijednost">＋</button>
+              </div>
+              <details class="editor-spacing"><summary><span>Razmaci linija</span><span class="summary-plus" aria-hidden="true">＋</span></summary><div id="ringInputs" class="ring-inputs"></div><button id="resetCalibrationButton" class="button text-button" type="button">Vrati krugove</button></details>
+            </div>
+            <div class="editor-footer"><button id="cancelLinesButton" class="button subtle" type="button">Odustani</button><button id="applyLinesButton" class="button primary" type="button">Primijeni</button></div>
+          </section>
           <div class="view-bottom">
             <div class="zoom-control"><label for="zoomRange">Uvećanje</label><input id="zoomRange" type="range" min="1" max="6" step="0.1" value="1"><output id="zoomValue" for="zoomRange">1.0×</output></div>
             <p id="zoomHelp" class="micro-copy">Uvećanje prikaza mete.</p>
             <div class="focus-row"><button id="focusButton" class="button text-button" type="button" disabled>Fokus u centru</button><p id="focusHint" class="micro-copy" aria-live="polite">Uključi kameru da provjeriš dostupnost fokusa na dodir.</p></div>
             <label for="cameraSelect" class="sr-only">Odaberi kameru</label><select id="cameraSelect" hidden></select>
-            <div class="calibration-row"><button id="calibrationButton" class="button text-button" type="button"><svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="M10 1v5M10 14v5M1 10h5M14 10h5"/></svg>Podesi metu</button><span id="calibrationHint" class="micro-copy">Postavi centar i vanjski krug mete.</span></div>
+            <div class="calibration-row"><button id="calibrationButton" class="button text-button" type="button"><svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="M10 1v5M10 14v5M1 10h5M14 10h5"/></svg>Podesi linije</button><span id="calibrationHint" class="micro-copy">Prepoznaj i prilagodi linije direktno na slici.</span></div>
           </div>
           <div class="tracking-strip">
             <div class="tracking-status"><span id="statusBadge" class="status-pill">SPREMNO</span><div><p id="statusText">Spremno za prvu seriju</p><p id="statusHint" class="micro-copy">Uključi kameru ili isprobaj simuliranu metu.</p></div></div>
@@ -80,11 +104,8 @@
           </section>
 
           <details id="ringSettings" class="settings-panel">
-            <summary><span>Krugovi i prepoznavanje</span><span class="summary-plus" aria-hidden="true">＋</span></summary>
+            <summary><span>Prepoznavanje</span><span class="summary-plus" aria-hidden="true">＋</span></summary>
             <div class="settings-content">
-              <p class="micro-copy">Deset koncentričnih bodovnih krugova. Početno su jednako razmaknuti; prilagodi ih svojoj meti.</p>
-              <div id="ringInputs" class="ring-inputs"></div>
-              <button id="resetCalibrationButton" class="button text-button" type="button">Vrati krugove</button>
               <div class="sensitivity-control"><label for="thresholdRange">Prag promjene <output id="thresholdValue" for="thresholdRange">35</output></label><input id="thresholdRange" type="range" min="15" max="90" step="1" value="35"></div>
               <label class="check-row"><input id="confirmToggle" type="checkbox"><span>Potvrdi prije upisa</span></label>
               <p class="micro-copy">Bodovi su procjena prema centru prepoznate promjene. Demo koristi simulirane tragove.</p>
@@ -93,7 +114,7 @@
         </aside>
       </div>
     </main>
-    <footer class="app-footer"><span>META<span class="brand-dot">.</span></span><p>Prototip v0.2.1 · rezultati su procjene · slike ostaju na uređaju</p></footer>
+    <footer class="app-footer"><span>META<span class="brand-dot">.</span></span><p>Prototip v0.3 · rezultati su procjene · slike ostaju na uređaju</p></footer>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script type="module" src="./app.js"></script>

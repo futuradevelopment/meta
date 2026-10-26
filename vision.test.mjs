@@ -1,10 +1,7 @@
-import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-
-// Import the browser ES module independently of the host project's package type.
-const source = await readFile(new URL('./dist/vision.js', import.meta.url), 'utf8');
-const { ChangeDetector, scorePoint } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+import { ChangeDetector, scorePoint } from './dist/vision.js';
+import { normalizedDistance } from './dist/geometry.js';
 const calibration = { cx: 0.5, cy: 0.5, radius: 0.45 };
 
 function frame(value = 180, size = 100) {
@@ -88,6 +85,49 @@ test('ignores changes outside the target and transient marks', () => {
   assert.equal(detector.analyze(mark, calibration, {}, 0).status, 'waiting');
   assert.equal(detector.analyze(frame(), calibration, {}, 100).status, 'stable');
   assert.equal(detector.analyze(mark, calibration, {}, 200).status, 'waiting');
+});
+
+test('elliptical mask ignores outside changes but detects a mark beyond the legacy radius', () => {
+  const c = { shape: 'ellipse', cx: .5, cy: .5, radius: .1, radiusX: .38, radiusY: .18, rings: [.2, .4, .6, .8, 1] };
+  const detector = new ChangeDetector(100, 100);
+  detector.setReference(frame());
+  // Within the old circular default, but above this ellipse.
+  assert.equal(detector.analyze(paint(frame(), 48, 20, 3, 3, 30), c, {}, 0).status, 'stable');
+  // Within the ellipse but outside its retained legacy radius.
+  const result = detector.analyze(paint(frame(), 76, 48, 3, 3, 30), c, { stableFrames: 1 }, 100);
+  assert.equal(result.status, 'candidate');
+  assert.ok(result.candidate.x > .7);
+  assert.equal(scorePoint(result.candidate.x, result.candidate.y, c), 7);
+});
+
+test('oval mask and exposure sampling exclude exterior lighting changes', () => {
+  const c = { shape: 'oval', cx: .5, cy: .5, radius: .45, radiusX: .35, radiusY: .15, rotation: 28, exponent: 2.6, rings: [.2, .4, .6, .8, 1] };
+  const detector = new ChangeDetector(100, 100);
+  detector.setReference(frame(130));
+  const changed = frame(210);
+  for (let y = 0; y < 100; y++) for (let x = 0; x < 100; x++) {
+    if (normalizedDistance((x + .5) / 100, (y + .5) / 100, c) <= 1) paint(changed, x, y, 1, 1, 130);
+  }
+  assert.equal(detector.analyze(changed, c, {}, 0).status, 'stable');
+  paint(changed, 49, 49, 3, 3, 20);
+  const result = detector.analyze(changed, c, { stableFrames: 1 }, 100);
+  assert.equal(result.status, 'candidate');
+  assert.equal(scorePoint(result.candidate.x, result.candidate.y, c), 10);
+});
+
+test('live ellipse rotation rebuilds alignment features for the new target region', () => {
+  const original = frame(205), current = frame(205);
+  for (const offset of [15, 25, 35, 65, 75, 85]) {
+    // The two disjoint regions deliberately move in opposite directions.
+    paint(original, offset, 47, 3, 3, 30); paint(current, offset + 3, 47, 3, 3, 30);
+    paint(original, 47, offset, 3, 3, 30); paint(current, 44, offset, 3, 3, 30);
+  }
+  const c = { shape: 'ellipse', cx: .5, cy: .5, radiusX: .4, radiusY: .12, rotation: 0 };
+  const detector = new ChangeDetector(100, 100);
+  detector.setReference(original);
+  assert.deepEqual(detector.analyze(current, c, {}, 0).alignment, { x: .03, y: 0 });
+  c.rotation = 90;
+  assert.deepEqual(detector.analyze(current, c, {}, 150).alignment, { x: -.03, y: 0 });
 });
 
 function rings(size = 100) {

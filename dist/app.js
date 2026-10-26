@@ -1,5 +1,8 @@
 import { ChangeDetector, scorePoint } from './vision.js';
 import { focusSupport, cropPointToCamera, requestPointFocus } from './focus.js';
+import { normalizeCalibration, contourPoint } from './geometry.js';
+import { targetPreset, guideHandles, hitTestGuide, beginGuideDrag, moveGuideDrag, adjustGuide, geometryFitsFrame } from './editor.js';
+import { suggestCalibration } from './recognition.js';
 
 const $ = id => document.getElementById(id);
 const canvas = $('cameraView');
@@ -12,7 +15,7 @@ const analysis = document.createElement('canvas');
 analysis.width = analysis.height = 320;
 const analysisCtx = analysis.getContext('2d', { willReadFrequently: true });
 const detector = new ChangeDetector(320, 320);
-const DEFAULT = () => ({ cx: .5, cy: .5, radius: .425, rings: Array.from({ length: 10 }, (_, i) => (i + 1) / 10) });
+const DEFAULT = () => targetPreset('circle');
 const state = {
   mode: 'demo', stream: null, active: false, opening: false, calibration: DEFAULT(),
   calibrated: true, calibrating: 0, pending: null, shots: [], marks: [],
@@ -22,6 +25,7 @@ const state = {
   alignment: { x: 0, y: 0 }, focusBusy: false, focusRequest: null,
   recoveryNoticeUntil: 0,
   geometryMismatch: false,
+  editor: null, demoTarget: DEFAULT(),
 };
 let toastTimer;
 let zoomTimer;
@@ -91,9 +95,10 @@ function pause(detail = 'Nastavi kada si spreman.') {
 }
 
 function start() {
+  if (state.editor) { toast('Prvo primijeni ili otkaži podešavanje linija.'); return false; }
   if (state.geometryMismatch) { calibrate(); return false; }
   if (state.calibrating) { toast('Prvo završi podešavanje krugova.'); return false; }
-  if (!state.calibrated) { toast('Prvo dodirni „Podesi metu“ i označi krugove.'); return false; }
+  if (!state.calibrated) { toast('Prvo dodirni „Podesi linije“ i poravnaj linije s metom.'); return false; }
   if (state.pending) { toast('Potvrdi ili odbaci prikazanu promjenu.'); return false; }
   if (!reference()) return false;
   state.active = true;
@@ -187,22 +192,37 @@ function renderHistory() {
   });
 }
 
+function traceContour(context, calibration, ring, size) {
+  const c = normalizeCalibration(calibration);
+  context.beginPath();
+  if (c.shape !== 'oval') {
+    context.ellipse(c.cx * size, c.cy * size, c.radiusX * ring * size, c.radiusY * ring * size, c.rotation * Math.PI / 180, 0, Math.PI * 2);
+    return;
+  }
+  for (let i = 0; i <= 128; i++) {
+    const p = contourPoint(i * Math.PI / 64, ring, c);
+    if (i === 0) context.moveTo(p.x * size, p.y * size);
+    else context.lineTo(p.x * size, p.y * size);
+  }
+  context.closePath();
+}
+
 function drawDemo() {
-  const w = raw.width;
+  const w = raw.width, c = normalizeCalibration(state.demoTarget);
   rawCtx.fillStyle = '#e8e5dc'; rawCtx.fillRect(0, 0, w, w);
   rawCtx.fillStyle = '#f3f1e9'; rawCtx.fillRect(23, 23, w - 46, w - 46);
-  const { cx, cy, radius } = DEFAULT();
-  for (let i = 10; i >= 1; i--) {
-    rawCtx.beginPath(); rawCtx.arc(cx * w, cy * w, radius * w * i / 10, 0, Math.PI * 2);
-    rawCtx.fillStyle = i <= 5 ? '#23272a' : '#f3f1e9'; rawCtx.fill();
-    rawCtx.strokeStyle = i <= 5 ? '#afb0a7' : '#616864'; rawCtx.lineWidth = 1; rawCtx.stroke();
-    if (i > 1) {
-      rawCtx.fillStyle = i <= 5 ? '#b9bbb1' : '#747b73'; rawCtx.font = '11px ui-monospace, monospace'; rawCtx.textAlign = 'center';
-      rawCtx.fillText(String(11 - i), w / 2, w / 2 - radius * w * (i - .5) / 10 + 4);
-      rawCtx.fillText(String(11 - i), w / 2 + radius * w * (i - .5) / 10, w / 2 + 4);
+  for (let i = c.rings.length - 1; i >= 0; i--) {
+    traceContour(rawCtx, c, c.rings[i], w);
+    const dark = c.shape === 'circle' && i < 5;
+    rawCtx.fillStyle = dark ? '#23272a' : '#f3f1e9'; rawCtx.fill();
+    rawCtx.strokeStyle = dark ? '#afb0a7' : '#616864'; rawCtx.lineWidth = 2; rawCtx.stroke();
+    if (i > 0) {
+      const label = contourPoint(0, (c.rings[i] + c.rings[i - 1]) / 2, c);
+      rawCtx.fillStyle = dark ? '#b9bbb1' : '#747b73'; rawCtx.font = '11px ui-monospace, monospace'; rawCtx.textAlign = 'center';
+      rawCtx.fillText(String(10 - i), label.x * w, label.y * w + 4);
     }
   }
-  rawCtx.fillStyle = '#c4c8bb'; rawCtx.font = '10px ui-monospace, monospace'; rawCtx.fillText('10', w / 2, w / 2 + 4);
+  rawCtx.fillStyle = c.shape === 'circle' ? '#c4c8bb' : '#747b73'; rawCtx.font = '11px ui-monospace, monospace'; rawCtx.fillText('10', c.cx * w, c.cy * w + 4);
   rawCtx.fillStyle = '#6b7267'; rawCtx.font = '10px ui-monospace, monospace'; rawCtx.textAlign = 'left'; rawCtx.fillText('META / PROBNI PRIKAZ', 43, 49);
   rawCtx.textAlign = 'right'; rawCtx.fillText('SIMULIRANA SLIKA', w - 43, w - 40);
   for (const m of state.marks) {
@@ -223,25 +243,32 @@ function drawRaw() {
   state.frameReady = true;
 }
 
-function strokeTargetGuide() {
+function strokeTargetGuide(selected = false) {
   // The white edge separates the red guide from dark printed target lines.
-  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 3.5; ctx.stroke();
-  ctx.strokeStyle = '#e02020'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = selected ? 6 : 3.5; ctx.stroke();
+  ctx.strokeStyle = '#e02020'; ctx.lineWidth = selected ? 3.5 : 2; ctx.stroke();
 }
 
 function drawOverlay(now) {
   const size = canvas.width;
   ctx.drawImage(raw, 0, 0, size, size);
-  const c = { ...state.calibration, cx: state.calibration.cx + state.alignment.x, cy: state.calibration.cy + state.alignment.y };
-  if ((state.calibrated && !state.geometryMismatch) || state.calibrating) {
+  const c = state.editor?.draft || { ...state.calibration, cx: state.calibration.cx + state.alignment.x, cy: state.calibration.cy + state.alignment.y };
+  if ((state.calibrated && !state.geometryMismatch) || state.editor) {
     ctx.save();
-    ctx.setLineDash(state.calibrating ? [5, 5] : []);
-    if (state.calibrating !== 2) for (const r of c.rings) {
-      ctx.beginPath(); ctx.arc(c.cx * size, c.cy * size, c.radius * r * size, 0, Math.PI * 2); strokeTargetGuide();
-    }
+    c.rings.forEach((r, i) => { traceContour(ctx, c, r, size); strokeTargetGuide(state.editor?.selected === i); });
     ctx.beginPath(); ctx.moveTo(c.cx * size - 8, c.cy * size); ctx.lineTo(c.cx * size + 8, c.cy * size); ctx.moveTo(c.cx * size, c.cy * size - 8); ctx.lineTo(c.cx * size, c.cy * size + 8); strokeTargetGuide();
+    if (state.editor) {
+      const handles = guideHandles(c);
+      for (const [name, p] of Object.entries(handles)) {
+        ctx.beginPath(); ctx.arc(p.x * size, p.y * size, name === 'center' ? 12 : 10, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.strokeStyle = '#e02020'; ctx.lineWidth = 3; ctx.stroke();
+        ctx.fillStyle = '#b91313'; ctx.textAlign = 'center'; ctx.font = 'bold 14px sans-serif';
+        ctx.fillText(({center:'+',width:'↔',height:'↕',rotation:'↻'})[name], p.x * size, p.y * size + 5);
+      }
+    }
     ctx.restore();
   }
+  if (state.editor) return;
   for (let i = 0; i < state.shots.length; i++) {
     const s = state.shots[i];
     if (state.geometryMismatch) continue;
@@ -271,7 +298,7 @@ function marker(x, y, label, color) {
 function frame(now) {
   // A confirmation refers to the exact displayed detection frame, not a newer
   // live frame that may have moved while the user was reviewing the result.
-  if (!state.pending) drawRaw();
+  if (!state.pending && !state.editor) drawRaw();
   if (state.active && !state.pending && !state.focusBusy && state.frameReady && now - state.lastAnalysis > 120 && now > state.holdUntil) {
     state.lastAnalysis = now;
     const result = detector.analyze(currentFrame(), state.calibration, { threshold: Number($('thresholdRange').value) }, now);
@@ -285,7 +312,7 @@ function frame(now) {
     } else if (result.status === 'recalibrate') {
       // Keep evaluating frames: a temporary bump can return to the calibrated
       // view without user intervention. Larger persistent changes need setup.
-      setStatus('motion', 'Kadar je pomjeren', 'Praćenje je uključeno. Vrati prethodni kadar ili dodirni „Podesi metu“.');
+      setStatus('motion', 'Kadar je pomjeren', 'Praćenje je uključeno. Vrati prethodni kadar ili dodirni „Podesi linije“.');
     } else if (result.status === 'movement') {
       if (result.reason === 'ambiguous') setStatus('motion', 'Više nejasnih promjena', 'Praćenje je uključeno. Za novo početno stanje odaberi „Nova referentna slika“.');
       else if (result.reason === 'scene') setStatus('motion', 'Nejasna promjena kadra', 'Praćenje je uključeno. Ako je slika sada mirna, provjeri krugove i postavi novu referentnu sliku.');
@@ -298,62 +325,183 @@ function frame(now) {
 
 function ringFields() {
   $('ringInputs').replaceChildren();
-  state.calibration.rings.forEach((r, i) => {
-    const label = document.createElement('label');
-    label.className = 'ring-field';
-    label.textContent = `${10 - i} bodova`;
+  const c = state.editor?.draft || state.calibration;
+  c.rings.forEach((r, i) => {
+    const label = document.createElement('label'); label.className = 'ring-field'; label.textContent = `${10 - i} bodova`;
     const input = document.createElement('input');
-    input.type = 'number'; input.min = '1'; input.max = '100'; input.step = '0.5'; input.value = +(r * 100).toFixed(1); input.setAttribute('aria-label', `Poluprečnik kruga ${10 - i}, u procentima vanjskog kruga`);
-    if (i === 9) input.disabled = true;
+    input.type = 'number'; input.min = '1'; input.max = '100'; input.step = '0.5'; input.value = +(r * 100).toFixed(1);
+    input.setAttribute('aria-label', `Veličina linije ${10 - i}, u procentima vanjske linije`);
+    input.disabled = i === c.rings.length - 1;
     input.addEventListener('change', () => {
-      const value = Number(input.value) / 100;
-      const previous = i ? state.calibration.rings[i - 1] : 0;
-      const next = state.calibration.rings[i + 1] ?? 1.01;
-      if (!Number.isFinite(value) || value <= previous || value >= next) { input.value = r * 100; toast('Krug mora biti između susjednih krugova.'); return; }
-      pause('Krugovi su izmijenjeni. Pokreni praćenje kada završiš.');
-      resetPending(); state.calibration.rings[i] = value; r = value; reference();
+      if (!state.editor || state.editor.busy) return;
+      const value = Number(input.value) / 100, draft = state.editor.draft;
+      const previous = i ? draft.rings[i - 1] : 0, next = draft.rings[i + 1] ?? 1.01;
+      if (!Number.isFinite(value) || value < previous + .015 || value > next - .015) { input.value = draft.rings[i] * 100; toast('Između susjednih linija ostavi najmanje 1,5%.'); return; }
+      draft.rings[i] = value; state.editor.selected = i; syncEditor();
     });
     label.append(input); $('ringInputs').append(label);
   });
 }
 
-function calibrate() {
-  if (!state.frameReady) return toast('Prvo uključi kameru.');
-  pause('Podešavanje mete je u toku.'); resetPending();
-  adoptAlignment();
-  state.geometryMismatch = false;
-  state.viewRevision++;
-  state.calibrating = 1;
-  canvas.style.cursor = 'crosshair';
-  $('calibrationHint').textContent = '1 / 2 · Dodirni tačan centar mete na slici.';
-  $('calibrationButton').textContent = 'Ponovi podešavanje';
-  setStatus('setup', 'Označi centar', 'Dodirni centar mete, zatim vanjski rub kruga koji vrijedi 1 bod.');
+function syncEditor(rebuild = false) {
+  const e = state.editor;
+  if (!e) return;
+  const c = normalizeCalibration(e.draft); e.draft = c;
+  e.selected = Math.max(0, Math.min(c.rings.length - 1, e.selected));
+  $('targetPreset').value = c.shape;
+  if (rebuild) {
+    $('selectedRing').replaceChildren();
+    c.rings.forEach((_r, i) => $('selectedRing').add(new Option(`${10 - i} bodova${i === c.rings.length - 1 ? ' · vanjska' : ''}`, String(i))));
+    ringFields();
+  }
+  $('selectedRing').value = String(e.selected);
+  const action = $('editorAction').value || 'size';
+  const labels = {size:'Veličina odabrane linije',width:'Širina svih linija',height:'Visina svih linija',rotation:'Nagib svih linija',centerX:'Centar lijevo / desno',centerY:'Centar gore / dolje',shape:'Zaobljenost ovala'};
+  $('editorParameterLabel').textContent = labels[action];
+  const sizeValue = e.selected === c.rings.length - 1 ? `${(c.radiusX * 200).toFixed(1)} × ${(c.radiusY * 200).toFixed(1)}%` : `${(c.rings[e.selected] * 100).toFixed(1)}%`;
+  const values = {size:sizeValue,width:`${(c.radiusX * 200).toFixed(1)}%`,height:`${(c.radiusY * 200).toFixed(1)}%`,rotation:`${c.rotation.toFixed(1)}°`,centerX:`${(c.cx * 100).toFixed(1)}%`,centerY:`${(c.cy * 100).toFixed(1)}%`,shape:c.exponent.toFixed(1)};
+  $('editorValue').textContent = values[action];
+  for (const id of ['autoLinesButton','applyLinesButton','targetPreset','selectedRing','editorAction','resetCalibrationButton']) $(id).disabled = !!e.busy;
+  $('minusButton').disabled = $('plusButton').disabled = !!e.busy || (action === 'shape' && c.shape !== 'oval');
 }
 
-let pointerStart = null;
-canvas.addEventListener('pointerdown', e => { pointerStart = { x: e.clientX, y: e.clientY, time: performance.now() }; });
-canvas.addEventListener('pointercancel', () => { pointerStart = null; });
-canvas.addEventListener('pointerup', e => {
-  const down = pointerStart; pointerStart = null;
-  if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 12 || performance.now() - down.time > 800) return;
-  const box = canvas.getBoundingClientRect();
-  const x = (e.clientX - box.left) / box.width, y = (e.clientY - box.top) / box.height;
-  if (!state.calibrating) { focusAt(x, y); return; }
-  if (state.calibrating === 1) {
-    state.calibration.cx = x; state.calibration.cy = y; state.calibrating = 2;
-    $('calibrationHint').textContent = '2 / 2 · Dodirni vanjski rub bodovnog kruga 1.';
-    setStatus('setup', 'Označi vanjski krug', 'Dodirni vanjsku liniju kruga koji vrijedi 1 bod.');
-  } else {
-    const radius = Math.hypot(x - state.calibration.cx, y - state.calibration.cy);
-    if (radius < .08) return toast('Odaberi vanjski krug, dalje od centra.');
-    const edge = Math.min(state.calibration.cx, 1 - state.calibration.cx, state.calibration.cy, 1 - state.calibration.cy);
-    if (radius > edge + .015) return toast('Cijela bodovna meta treba biti unutar kadra. Prilagodi kadar i ponovi podešavanje.');
-    state.calibration.radius = radius; state.calibrating = 0; state.calibrated = true;
-    canvas.style.cursor = 'default';
-    $('calibrationHint').textContent = 'Krugovi su podešeni. Provjeri preklapanje linija; razmake možeš prilagoditi ispod.';
-    $('calibrationButton').textContent = 'Podesi metu';
-    reference(); setStatus('ready', 'Meta je spremna', 'Dodirni „Pokreni praćenje“.');
+function calibrate() {
+  if (state.editor) return;
+  if (!state.frameReady) return toast('Prvo uključi kameru.');
+  if (state.pending) return toast('Prvo potvrdi ili odbaci prikazano očitanje.');
+  if (state.focusBusy) return toast('Sačekaj završetak zahtjeva za fokus.');
+  pause('Podešavanje linija je u toku.');
+  state.editor = {
+    draft: normalizeCalibration({ ...state.calibration, cx: state.calibration.cx + state.alignment.x, cy: state.calibration.cy + state.alignment.y }),
+    selected: state.calibration.rings.length - 1, drag: null, busy: false,
+    demoBefore: state.demoTarget, marksBefore: state.marks,
+  };
+  state.calibrating = 1; state.focusRequest = null;
+  $('targetEditor').hidden = false; $('viewPanel').classList.add('is-editing');
+  document.body?.classList.add('editing-target');
+  $('adjustLinesButton').setAttribute('aria-expanded', 'true');
+  canvas.style.cursor = 'grab'; canvas.style.touchAction = 'none';
+  $('editorAction').value = 'size';
+  $('editorHint').textContent = 'Odaberi oblik i dodirni „Prepoznaj linije“. Zatim povuci liniju ili bijele ručice. Slika je zadržana do završetka.';
+  syncEditor(true);
+  $('targetPreset').focus?.();
+}
+
+function closeEditor(apply) {
+  const e = state.editor;
+  if (!e || (apply && e.busy)) return;
+  if (apply && !geometryFitsFrame(e.draft)) {
+    $('editorHint').textContent = 'Vanjska linija izlazi iz slike. Smanji ili pomjeri raspored tako da je cijela meta u kadru.';
+    return;
   }
+  e.worker?.terminate(); e.rejectRecognition?.(new Error('cancelled'));
+  if (apply) {
+    state.calibration = normalizeCalibration(e.draft); state.calibrated = true;
+    state.alignment = { x: 0, y: 0 }; state.geometryMismatch = false; state.viewRevision++;
+    detector.setReference(currentFrame()); state.holdUntil = performance.now() + 600;
+    $('calibrationHint').textContent = `${state.calibration.rings.length} linija je podešeno. Dodirni „Podesi linije“ za izmjenu.`;
+    setStatus('ready', 'Linije su podešene', 'Dodirni „Pokreni praćenje“ kada provjeriš kadar.');
+  } else {
+    state.demoTarget = e.demoBefore; state.marks = e.marksBefore;
+    setStatus('idle', 'Podešavanje otkazano', 'Prethodne linije su sačuvane. Praćenje je pauzirano.');
+  }
+  state.editor = null; state.calibrating = 0;
+  $('targetEditor').hidden = true; $('viewPanel').classList.remove('is-editing');
+  document.body?.classList.remove('editing-target');
+  $('adjustLinesButton').setAttribute('aria-expanded', 'false');
+  canvas.style.cursor = 'default'; canvas.style.touchAction = 'manipulation';
+  $('adjustLinesButton').focus?.();
+}
+
+function changeTargetPreset() {
+  const e = state.editor;
+  if (!e || e.busy) return;
+  const preset = targetPreset($('targetPreset').value);
+  e.draft = { ...preset, cx: e.draft.cx, cy: e.draft.cy, rotation: e.draft.rotation };
+  e.selected = e.draft.rings.length - 1;
+  if (state.mode === 'demo') { state.demoTarget = targetPreset(preset.shape); state.marks = []; drawDemo(); }
+  $('editorHint').textContent = 'Oblik je odabran. Dodirni „Prepoznaj linije“ ili povuci crvene linije na štampane konture.';
+  syncEditor(true);
+}
+
+function recognitionInBackground(imageData, seed, editor) {
+  if (typeof Worker === 'undefined') return Promise.resolve().then(() => suggestCalibration(imageData, seed));
+  return new Promise((resolve, reject) => {
+    const worker = new Worker('./recognition-worker.js', { type: 'module' }); editor.worker = worker;
+    const timeout = setTimeout(() => finish(reject, new Error('timeout')), 15000);
+    const finish = (fn, value) => { clearTimeout(timeout); worker.terminate(); editor.worker = null; editor.rejectRecognition = null; fn(value); };
+    editor.rejectRecognition = error => finish(reject, error);
+    worker.onmessage = event => event.data.error ? finish(reject, new Error(event.data.error)) : finish(resolve, event.data.result);
+    worker.onerror = () => finish(reject, new Error('recognition'));
+    try { worker.postMessage({ imageData, seed }, [imageData.data.buffer]); }
+    catch (error) { finish(reject, error); }
+  });
+}
+
+async function recognizeLines() {
+  const e = state.editor;
+  if (!e || e.busy) return;
+  e.busy = true; syncEditor();
+  $('editorHint').textContent = 'Tražim linije na zadržanoj slici…';
+  try {
+    const result = await recognitionInBackground(currentFrame(), e.draft, e);
+    if (state.editor !== e) return;
+    if (result.status === 'suggested') {
+      e.draft = normalizeCalibration(result.calibration);
+      $('editorHint').textContent = 'Pronađen je prijedlog linija. Provjeri preklapanje, povuci linije za ispravku, pa dodirni „Primijeni“.';
+    } else $('editorHint').textContent = 'Linije nisu dovoljno jasne za automatski prijedlog. Možeš ih namjestiti povlačenjem ili ponoviti s boljim kadrom.';
+  } catch {
+    if (state.editor === e) $('editorHint').textContent = 'Prepoznavanje nije uspjelo. Linije možeš podesiti prstom i tipkama − / +.';
+  } finally { if (state.editor === e) { e.busy = false; syncEditor(true); } }
+}
+
+function fineAdjust(direction) {
+  const e = state.editor;
+  if (!e || e.busy) return;
+  const action = $('editorAction').value || 'size';
+  const step = action === 'rotation' ? 1 : action === 'shape' ? .1 : action === 'size' ? .005 : .0025;
+  e.draft = adjustGuide(e.draft, e.selected, action, direction * step); syncEditor(true);
+}
+
+function canvasPoint(event) {
+  const box = canvas.getBoundingClientRect();
+  return { x: (event.clientX - box.left) / box.width, y: (event.clientY - box.top) / box.height };
+}
+let pointerStart = null;
+canvas.addEventListener('pointerdown', event => {
+  if (event.isPrimary === false) return;
+  const p = canvasPoint(event), e = state.editor;
+  pointerStart = { x: event.clientX, y: event.clientY, time: performance.now(), id: event.pointerId };
+  if (!e || e.busy) return;
+  const tolerance = 16 / canvas.getBoundingClientRect().width;
+  const hit = hitTestGuide(p.x, p.y, e.draft, tolerance, e.selected);
+  if (!hit) { $('editorHint').textContent = 'Dodirni crvenu liniju ili bijelu ručicu. Centar pomjera sve linije.'; return; }
+  if (hit.kind === 'ring') { e.selected = hit.index; $('editorAction').value = 'size'; }
+  else if (hit.kind !== 'center') e.selected = e.draft.rings.length - 1;
+  e.dragSnapshot = e.draft; e.drag = beginGuideDrag(hit, p, e.draft);
+  canvas.setPointerCapture?.(event.pointerId); event.preventDefault?.(); canvas.style.cursor = 'grabbing';
+  syncEditor();
+});
+canvas.addEventListener('pointermove', event => {
+  const e = state.editor;
+  if (!e?.drag || event.pointerId !== pointerStart?.id) return;
+  e.draft = moveGuideDrag(e.drag, canvasPoint(event)); event.preventDefault?.(); syncEditor();
+});
+canvas.addEventListener('pointercancel', () => {
+  if (state.editor?.drag) { state.editor.draft = state.editor.dragSnapshot; state.editor.drag = null; syncEditor(true); }
+  pointerStart = null;
+});
+canvas.addEventListener('pointerup', event => {
+  const down = pointerStart;
+  if (down && event.pointerId !== down.id) return;
+  pointerStart = null;
+  if (state.editor) {
+    if (state.editor.drag) { state.editor.draft = moveGuideDrag(state.editor.drag, canvasPoint(event)); state.editor.drag = null; syncEditor(true); }
+    if (canvas.hasPointerCapture?.(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    canvas.style.cursor = 'grab'; return;
+  }
+  if (!down || Math.hypot(event.clientX - down.x, event.clientY - down.y) > 12 || performance.now() - down.time > 800) return;
+  const p = canvasPoint(event); focusAt(p.x, p.y);
 });
 
 function updateFocusUI() {
@@ -361,7 +509,7 @@ function updateFocusUI() {
   const support = focusSupport(track, navigator.mediaDevices?.getSupportedConstraints?.() || {});
   $('focusButton').disabled = state.mode !== 'camera' || !support.point;
   $('focusHint').textContent = state.mode !== 'camera' ? 'Uključi kameru da provjeriš dostupnost fokusa na dodir.'
-    : support.point ? 'Dodirni sliku za zahtjev fokusa na tom mjestu. Tokom podešavanja dodiri označavaju krugove.'
+    : support.point ? 'Dodirni sliku za zahtjev fokusa na tom mjestu. Tokom podešavanja linije pomjeraš prstom.'
     : 'Ovaj preglednik ne omogućava fokusiranje dodirom; fokusom upravlja kamera.';
 }
 
@@ -403,6 +551,7 @@ async function focusAt(x, y) {
 }
 
 function clearSeries(showToast = true) {
+  if (state.editor) closeEditor(false);
   if (state.geometryMismatch) {
     pause('Kadar je promijenjen. Ponovo podesi metu.');
     state.calibrated = false;
@@ -415,6 +564,7 @@ function clearSeries(showToast = true) {
 }
 
 async function openCamera(deviceId) {
+  if (state.editor) closeEditor(false);
   if (state.opening) return;
   state.opening = true; $('cameraButton').disabled = true;
   pause('Otvaram kameru…');
@@ -449,7 +599,7 @@ async function openCamera(deviceId) {
     $('sourceBadge').textContent = 'KAMERA · UŽIVO';
     $('demoMarkButton').hidden = true;
     $('cameraButton').textContent = 'Osvježi kameru';
-    $('calibrationHint').textContent = 'Namjesti kadar, pa dodirni „Podesi metu“.';
+    $('calibrationHint').textContent = 'Namjesti kadar, pa dodirni „Podesi linije“.';
     $('cameraSelect').replaceChildren();
     const devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
     for (const [i, d] of devices.entries()) $('cameraSelect').add(new Option(d.label || `Kamera ${i + 1}`, d.deviceId));
@@ -469,8 +619,9 @@ async function openCamera(deviceId) {
 }
 
 function demo() {
+  if (state.editor) closeEditor(false);
   pause(); state.stream?.getTracks().forEach(t => t.stop()); state.stream = null; video.srcObject = null;
-  state.mode = 'demo'; state.calibrating = 0; state.calibrated = true; state.calibration = DEFAULT();
+  state.mode = 'demo'; state.calibrating = 0; state.calibrated = true; state.calibration = DEFAULT(); state.demoTarget = DEFAULT();
   state.alignment = { x: 0, y: 0 }; state.focusRequest = null; state.geometryMismatch = false;
   state.zoom = 1; state.nativeZoom = false;
   $('zoomRange').min = 1; $('zoomRange').max = 6; $('zoomRange').value = 1; $('zoomRange').disabled = true; $('zoomValue').textContent = '1.0×';
@@ -479,7 +630,7 @@ function demo() {
   $('demoMarkButton').hidden = false; $('cameraSelect').hidden = true;
   $('cameraButton').textContent = 'Uključi kameru';
   $('calibrationHint').textContent = 'Probna meta je već podešena. Dodaj trag da isprobaš očitavanje.';
-  $('calibrationButton').textContent = 'Podesi metu';
+  $('calibrationButton').textContent = 'Podesi linije';
   canvas.style.cursor = 'default';
   clearSeries(false); ringFields();
   updateFocusUI();
@@ -498,12 +649,19 @@ $('referenceButton').addEventListener('click', () => {
 });
 $('calibrationButton').addEventListener('click', calibrate);
 $('focusButton').addEventListener('click', () => focusAt(.5, .5));
+$('adjustLinesButton').addEventListener('click', calibrate);
+$('targetPreset').addEventListener('change', changeTargetPreset);
+$('autoLinesButton').addEventListener('click', recognizeLines);
+$('applyLinesButton').addEventListener('click', () => closeEditor(true));
+$('cancelLinesButton').addEventListener('click', () => closeEditor(false));
+$('selectedRing').addEventListener('change', () => { if (state.editor) { state.editor.selected = Number($('selectedRing').value); syncEditor(); } });
+$('editorAction').addEventListener('change', () => syncEditor());
+$('minusButton').addEventListener('click', () => fineAdjust(-1));
+$('plusButton').addEventListener('click', () => fineAdjust(1));
 $('resetCalibrationButton').addEventListener('click', () => {
-  state.alignment = { x: 0, y: 0 };
-  state.geometryMismatch = false;
-  pause(); state.calibration = DEFAULT(); state.calibrated = state.mode === 'demo'; state.calibrating = 0; resetPending(); ringFields();
-  $('calibrationHint').textContent = state.calibrated ? 'Vraćeni su krugovi probne mete.' : 'Dodirni „Podesi metu“ da označiš stvarnu metu.';
-  canvas.style.cursor = 'default'; $('calibrationButton').textContent = 'Podesi metu'; reference();
+  if (!state.editor || state.editor.busy) return;
+  state.editor.draft = targetPreset($('targetPreset').value); state.editor.selected = state.editor.draft.rings.length - 1;
+  syncEditor(true);
 });
 $('zoomRange').addEventListener('input', () => {
   if (state.mode !== 'camera') return;
@@ -512,7 +670,7 @@ $('zoomRange').addEventListener('input', () => {
   state.geometryMismatch = false;
   pause('Kadar je promijenjen. Ponovo podesi metu.'); resetPending(); state.calibrated = false; state.calibrating = 0;
   state.zoom = Number($('zoomRange').value); $('zoomValue').textContent = `${state.zoom.toFixed(1)}×`;
-  $('calibrationHint').textContent = 'Zum je promijenjen. Ponovo dodirni „Podesi metu“.';
+  $('calibrationHint').textContent = 'Zum je promijenjen. Ponovo dodirni „Podesi linije“.';
   if (state.nativeZoom) {
     clearTimeout(zoomTimer);
     zoomTimer = setTimeout(async () => {

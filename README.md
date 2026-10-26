@@ -1,6 +1,6 @@
 # Meta — glasovni rezultati
 
-Verzija 0.2.1: crveni krugovi i oznaka centra s tankim bijelim obrubom za jasniji prikaz preko papirne mete. Uključuje oporavak nakon stabilizacije slike i provjeru podrške za fokus na dodir iz verzije 0.2.
+Verzija 0.3: kružne, eliptične i ovalne mete, automatski prijedlog kontura i direktno podešavanje crvenih linija na slici.
 
 Web prototip za pasivno očitavanje vidljivih promjena na papirnoj meti. Kamera, obrada slike i glasovne objave rade u pregledniku na telefonu. Aplikacija nema backend niti šalje slike na server.
 
@@ -9,8 +9,11 @@ Web prototip za pasivno očitavanje vidljivih promjena na papirnoj meti. Kamera,
 1. Otvori aplikaciju preko HTTPS-a, npr. u Safariju na iPhoneu.
 2. Za probu odaberi **Dodaj probni trag**. Demo slika prolazi kroz isti detektor promjena kao kamera.
 3. Za stvarnu sliku odaberi **Uključi kameru**, dozvoli pristup i namjesti kadar.
-4. Odaberi **Podesi metu**, označi centar i vanjski rub bodovnog kruga 1. Po potrebi prilagodi razmake krugova.
-5. Odaberi **Pokreni praćenje**. Dostupni su glasovni rezultati, ručna potvrda očitanja, pregled serije i CSV izvoz.
+4. Dodirni **Podesi linije** iznad kamere. U editoru odaberi **Kružna · 10–1**, **Eliptična · 10–1** ili **Ovalna · 10–6** za metu s pet izduženih kontura.
+5. Dodirni **Prepoznaj linije** za automatski prijedlog. Provjeri rezultat: dodirni crvenu liniju i povuci je da promijeniš veličinu. Centar pomjera cijeli raspored; bijele ručice podešavaju širinu, visinu i nagib. Tipke **− / +** služe za fine ispravke odabrane vrijednosti.
+6. Dodirni **Primijeni**, pa **Pokreni praćenje**. Dostupni su glasovni rezultati, ručna potvrda očitanja, pregled serije i CSV izvoz.
+
+Podešavanje se otvara preko cijelog ekrana, uz zadržanu sliku i pauzirano praćenje. Automatski prijedlog ne mijenja primijenjene linije dok ne potvrdiš **Primijeni**. **Odustani** vraća prethodni raspored. Ranije zabilježeni rezultati ostaju isti. Razmaci pojedinačnih linija mogu se dodatno unijeti u **Razmaci linija**, unutar editora. U demo prikazu odabir oblika mijenja i simuliranu papirnu metu.
 
 Dok podešavanje krugova nije aktivno, dodir slike šalje zahtjev za fokus ako ga preglednik i odabrana kamera podržavaju. Dugme **Fokus u centru** radi istu radnju za centar kadra. Ako podrška ne postoji, aplikacija to jasno navodi i ne prikazuje lažnu potvrdu fokusiranja. Standardni Safari trenutno ne izlaže sve potrebne kontrole; fokusom tada upravlja kamera.
 
@@ -44,12 +47,14 @@ Za desktop probu posluži sadržaj direktorija `dist/` na `localhost`; za telefo
 npm test
 ```
 
-Testovi pokrivaju detektor promjena i kontrolu fokusa, uključujući ponašanje kada preglednik nema odgovarajuću podršku. Testiranje na stvarnom telefonu ostaje potrebno.
+Testovi pokrivaju geometriju i bodovanje različitih oblika, detektor promjena, direktno uređivanje linija, automatsko prepoznavanje, potvrdu/otkazivanje prijedloga i kontrolu fokusa. Testiranje na stvarnom telefonu ostaje potrebno.
 
 ## Granice prototipa
 
 - Bodovi su procjena prema centru detektovane promjene, a ne službeno bodovanje dodira ruba kruga.
-- Detektor radi unutar podešenog vanjskog kruga; početnih deset krugova je jednako razmaknuto.
+- Detektor radi unutar podešene vanjske konture. Kružni i eliptični predložak imaju deset zona (10–1), a ovalni pet (10–6).
+- Automatsko prepoznavanje traži koncentrične konture na uglavnom frontalnoj i dobro vidljivoj meti. Rezultat je prijedlog za ručnu provjeru; jaka perspektiva, odsječene linije, sjene ili oštećenja mogu spriječiti dobar prijedlog.
+- Oval je prilagodljiv zaobljeni oblik sa zajedničkim centrom i proporcijama svih linija. To nije tačna rekonstrukcija proizvoljne štampane konture; zaobljenost i razmake treba provjeriti prema konkretnoj meti.
 - Kamera, izbor objektiva i zum zavise od preglednika. Ako preglednik ne izloži zum kamere, koristi se digitalno uvećanje.
 - Fokus na dodir zavisi od podrške preglednika i kamere. Prihvaćen zahtjev ne dokazuje da je slika postala oštra. Aplikacija ne pokreće kameru ponovo da bi simulirala fokusiranje.
 - Glas zavisi od dostupnih glasova na telefonu. Prednost imaju bosanski, hrvatski i srpski glasovi, ako postoje.
